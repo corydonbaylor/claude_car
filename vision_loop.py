@@ -59,7 +59,7 @@ class VisionControlLoop:
                                 "type": "text",
                                 "text": (
                                     "You are controlling an RC car with a camera. "
-                                    "Look at this image and decide what the car should do next. "
+                                    "Look at this image and decide what the car should do next. Do not let the car run into anything."
                                     "Respond with ONLY ONE word from this list: "
                                     "forward, backward, left, right, or stop. "
                                     "No explanations, just the word."
