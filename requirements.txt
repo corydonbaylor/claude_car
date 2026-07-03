@@ -1,1 +1,2 @@
 anthropic>=0.25.0
+RPi.GPIO>=0.7.0  # Only installs on Raspberry Pi
