@@ -80,7 +80,7 @@ class VisionControlLoop:
         """
         try:
             message = self.client.messages.create(
-                model="claude-haiku-4-5-20251001",
+                model="claude-sonnet-5",
                 max_tokens=150,
                 messages=[
                     {
