@@ -114,7 +114,11 @@ class VisionControlLoop:
                 ],
             )
 
-            response_text = message.content[0].text.strip()
+            # Sonnet may return non-text blocks (e.g. ThinkingBlock) before the
+            # text block, so find the text block explicitly rather than
+            # assuming content[0] is it.
+            text_blocks = [block.text for block in message.content if block.type == "text"]
+            response_text = "\n".join(text_blocks).strip()
 
             seen_text = None
             direction_line = response_text
@@ -137,6 +141,9 @@ class VisionControlLoop:
 
         except anthropic.APIError as e:
             logger.error(f"API error: {e}")
+            return "stop"
+        except Exception as e:
+            logger.error(f"Error getting next action: {e}", exc_info=True)
             return "stop"
 
     def _drive(self, action: str):
@@ -191,14 +198,17 @@ class VisionControlLoop:
                 continue
 
             count += 1
-            image_b64 = self.camera.get_image_base64(image_path)
+            try:
+                image_b64 = self.camera.get_image_base64(image_path)
 
-            logger.info(f"[Reasoning #{count}] Sending frame to Claude...")
-            action = self.get_next_action(image_b64)
-            logger.info(f"[Reasoning #{count}] Claude decided: {action}")
+                logger.info(f"[Reasoning #{count}] Sending frame to Claude...")
+                action = self.get_next_action(image_b64)
+                logger.info(f"[Reasoning #{count}] Claude decided: {action}")
 
-            with self.action_lock:
-                self.current_action = action
+                with self.action_lock:
+                    self.current_action = action
+            except Exception as e:
+                logger.error(f"[Reasoning #{count}] Unexpected error: {e}", exc_info=True)
 
             self.stop_event.wait(self.reasoning_interval)
 
