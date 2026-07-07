@@ -18,20 +18,22 @@ class VisionControlLoop:
     """
     Continuous control loop split across two threads:
 
-    - Reflex loop (fast, no API calls): the only thread that touches the
-      camera. Captures frames on a short tick, checks for an obstacle
-      directly ahead via OpenCV, and either evades it or keeps driving
-      continuously in the current target direction. No stop-start between
-      ticks — this is what removes the jerkiness of the old capture ->
-      Claude -> move -> stop cycle.
-    - Reasoning loop (slow, calls Claude): periodically reads the most
-      recently captured frame and asks Claude to reason about the goal
-      (e.g. navigating toward a roll of duct tape), then updates the
-      target direction the reflex loop drives toward.
+    - Reflex loop (fast, no API calls): drives continuously in the current
+      target direction and reacts instantly to obstacles via OpenCV. No
+      stop-start between ticks — this is what removes the jerkiness of the
+      old capture -> Claude -> move -> stop cycle. It pauses (holds the car
+      still, doesn't capture) whenever the reasoning loop is mid-capture.
+    - Reasoning loop (slow, calls Claude): periodically stops the car, waits
+      briefly for motion to settle, captures its own fresh (unblurred) frame,
+      then resumes driving while it asks Claude for the target direction.
+
+    Only one of the two loops ever touches the camera hardware at a time —
+    guarded by camera_lock — to avoid two concurrent captures.
     """
 
     def __init__(self, use_gpio: bool = True, headless: bool = False,
-                 reasoning_interval: float = 2.0, reflex_interval: float = 0.3):
+                 reasoning_interval: float = 2.0, reflex_interval: float = 0.3,
+                 capture_settle_time: float = 0.4):
         """
         Initialize vision control loop.
 
@@ -40,6 +42,8 @@ class VisionControlLoop:
             headless: If True, doesn't require display for camera preview
             reasoning_interval: Seconds between Claude reasoning calls
             reflex_interval: Seconds between reflex/motor ticks
+            capture_settle_time: Seconds to hold the car still before the
+                reasoning loop captures a frame, so it isn't motion-blurred
         """
         self.motor = MotorController(use_gpio=use_gpio)
         self.camera = Camera()
@@ -48,12 +52,13 @@ class VisionControlLoop:
         self.headless = headless
         self.reasoning_interval = reasoning_interval
         self.reflex_interval = reflex_interval
+        self.capture_settle_time = capture_settle_time
 
         self.current_action = "stop"
         self.action_lock = threading.Lock()
 
-        self.latest_image_path = None
-        self.image_lock = threading.Lock()
+        self.camera_lock = threading.Lock()
+        self.paused_for_capture = threading.Event()
 
         self.stop_event = threading.Event()
 
@@ -182,11 +187,15 @@ class VisionControlLoop:
             self.motor.stop()
 
     def _reflex_loop(self):
-        """Fast loop: owns the camera, drives motors continuously, evades obstacles."""
+        """Fast loop: drives motors continuously, evades obstacles, holds still during reasoning captures."""
         while not self.stop_event.is_set():
-            image_path = self._capture()
-            with self.image_lock:
-                self.latest_image_path = image_path
+            if self.paused_for_capture.is_set():
+                self.motor.stop()
+                self.stop_event.wait(0.05)
+                continue
+
+            with self.camera_lock:
+                image_path = self._capture()
 
             reflex_result = self.reflex.check(image_path)
 
@@ -204,7 +213,7 @@ class VisionControlLoop:
             self.stop_event.wait(self.reflex_interval)
 
     def _reasoning_loop(self, iterations):
-        """Slow loop: asks Claude for the target direction toward the goal."""
+        """Slow loop: stops the car, captures a clean frame, then asks Claude for the target direction."""
         count = 0
         while not self.stop_event.is_set():
             if iterations is not None and count >= iterations:
@@ -212,15 +221,18 @@ class VisionControlLoop:
                 self.stop_event.set()
                 break
 
-            with self.image_lock:
-                image_path = self.latest_image_path
-
-            if image_path is None:
-                self.stop_event.wait(0.1)
-                continue
-
             count += 1
             try:
+                # Hold the car still so this capture isn't motion-blurred.
+                self.paused_for_capture.set()
+                self.motor.stop()
+                self.stop_event.wait(self.capture_settle_time)
+
+                with self.camera_lock:
+                    image_path = self._capture()
+
+                self.paused_for_capture.clear()
+
                 image_b64 = self.camera.get_image_base64(image_path)
 
                 logger.info(f"[Reasoning #{count}] Sending frame to Claude...")
@@ -231,6 +243,7 @@ class VisionControlLoop:
                     self.current_action = action
             except Exception as e:
                 logger.error(f"[Reasoning #{count}] Unexpected error: {e}", exc_info=True)
+                self.paused_for_capture.clear()
 
             self.stop_event.wait(self.reasoning_interval)
 
@@ -313,6 +326,12 @@ def main():
         help="Seconds between reflex/motor ticks (default: 0.3)",
     )
     parser.add_argument(
+        "--capture-settle",
+        type=float,
+        default=0.4,
+        help="Seconds to hold the car still before each reasoning capture, to avoid motion blur (default: 0.4)",
+    )
+    parser.add_argument(
         "--simulate",
         action="store_true",
         help="Run in simulation mode (no GPIO, mock camera)",
@@ -339,6 +358,7 @@ def main():
         use_gpio=not args.simulate,
         reasoning_interval=args.reasoning_interval,
         reflex_interval=args.reflex_interval,
+        capture_settle_time=args.capture_settle,
     )
     loop.run(iterations=args.iterations, duration_per_action=args.duration)
 

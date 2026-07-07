@@ -24,8 +24,14 @@ class Camera:
         """
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
+        self._clear_output_dir()
         self.last_image_path = None
         self.rotation = rotation
+
+    def _clear_output_dir(self):
+        """Remove images left over from a previous run, so captures/ only ever holds the latest run for review."""
+        for f in self.output_dir.glob("*.jpg"):
+            f.unlink()
 
     def capture_image(self, filename: str = None) -> Path:
         """
