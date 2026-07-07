@@ -67,16 +67,19 @@ class VisionControlLoop:
         """
         Send image to Claude and get next action.
 
-        Asks for a brief "SEEN:" description alongside the "DIRECTION:" word
-        so we can log what Claude is actually seeing in the frame — useful
-        for telling apart a recognition problem (target not identified) from
-        a camera/resolution problem (target not visible/legible at all).
+        Claude only reports structured observations (found? where? what's
+        visible) — it does NOT pick the direction itself. The direction is
+        derived deterministically in _decide_action(). This prevents Claude
+        from guessing a direction (e.g. 'forward') when the target isn't
+        actually in frame, and enforces a clear search -> approach state
+        machine: turn to search while not found, keep turning toward the
+        target until it's centered, then drive forward.
 
         Args:
             image_base64: Base64-encoded image string
 
         Returns:
-            One of: 'forward', 'backward', 'left', 'right', 'stop'
+            One of: 'forward', 'left', 'right', 'stop'
         """
         try:
             message = self.client.messages.create(
@@ -97,16 +100,17 @@ class VisionControlLoop:
                             {
                                 "type": "text",
                                 "text": (
-                                    "You are controlling an RC car with a camera. "
-                                    "Your goal is to navigate toward a shoe. "
-                                    "Look at this image. If you see a shoe, pick the direction that moves "
-                                    "the car toward it: 'forward' if it's roughly centered ahead, 'left' or "
-                                    "'right' if it's off to one side. If the shoe fills most of the frame, "
-                                    "you've arrived — pick 'stop'. If you don't see a shoe anywhere, pick "
-                                    "'left' or 'right' to search for it.\n\n"
-                                    "Respond in exactly this format, two lines:\n"
-                                    "DIRECTION: <forward|backward|left|right|stop>\n"
-                                    "SEEN: <one short sentence describing what's in the frame>"
+                                    "You are the vision system for an RC car searching for a shoe. "
+                                    "Look at this image and report what you observe — do not decide "
+                                    "any movement yourself.\n\n"
+                                    "Respond in exactly this format, three lines:\n"
+                                    "FOUND: <yes|no>\n"
+                                    "POSITION: <left|center|right|none>\n"
+                                    "SEEN: <one short sentence describing what's in the frame>\n\n"
+                                    "FOUND is 'yes' only if a shoe is clearly visible somewhere in the "
+                                    "frame. POSITION is 'none' if FOUND is 'no'; otherwise it's 'left' if "
+                                    "the shoe is in the left portion of the frame, 'right' if in the right "
+                                    "portion, or 'center' if roughly in the middle."
                                 ),
                             },
                         ],
@@ -120,30 +124,48 @@ class VisionControlLoop:
             text_blocks = [block.text for block in message.content if block.type == "text"]
             response_text = "\n".join(text_blocks).strip()
 
+            found = False
+            position = "none"
             seen_text = None
-            direction_line = response_text
+
             for line in response_text.splitlines():
-                if line.strip().lower().startswith("seen:"):
+                line_lower = line.strip().lower()
+                if line_lower.startswith("found:"):
+                    found = "yes" in line_lower
+                elif line_lower.startswith("position:"):
+                    position = line.split(":", 1)[1].strip().lower()
+                elif line_lower.startswith("seen:"):
                     seen_text = line.split(":", 1)[1].strip()
-                elif line.strip().lower().startswith("direction:"):
-                    direction_line = line.split(":", 1)[1].strip()
 
             if seen_text:
                 logger.info(f"[Claude sees] {seen_text}")
+            logger.info(f"[Claude reports] found={found}, position={position}")
 
-            direction_line = direction_line.lower()
-            for direction in ["forward", "backward", "left", "right", "stop"]:
-                if direction in direction_line:
-                    return direction
-
-            logger.warning(f"Could not parse Claude response: {response_text}")
-            return "stop"
+            return self._decide_action(found, position)
 
         except anthropic.APIError as e:
             logger.error(f"API error: {e}")
             return "stop"
         except Exception as e:
             logger.error(f"Error getting next action: {e}", exc_info=True)
+            return "stop"
+
+    def _decide_action(self, found: bool, position: str) -> str:
+        """
+        Deterministically map Claude's structured observation to a motor
+        action. Claude never picks the direction directly, so it can't
+        drive forward on a hunch when the target isn't actually visible.
+        """
+        if not found:
+            return "left"  # search by turning; a fixed direction avoids oscillation
+
+        if position == "center":
+            return "forward"
+        elif position == "left":
+            return "left"
+        elif position == "right":
+            return "right"
+        else:
             return "stop"
 
     def _drive(self, action: str):
