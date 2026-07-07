@@ -10,16 +10,22 @@ logger = logging.getLogger(__name__)
 class Camera:
     """Captures images from Arducam camera on Raspberry Pi."""
 
-    def __init__(self, output_dir: str = "./captures"):
+    def __init__(self, output_dir: str = "./captures", rotation: int = 180):
         """
         Initialize camera.
 
         Args:
             output_dir: Directory to save captured images
+            rotation: Degrees to rotate captured images (0, 90, 180, or 270).
+                Defaults to 180 since the Arducam is mounted upside-down on
+                this chassis. The reflex engine assumes the bottom of the
+                frame is closest to the car, so getting this right matters
+                for obstacle avoidance, not just for Claude's recognition.
         """
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
         self.last_image_path = None
+        self.rotation = rotation
 
     def capture_image(self, filename: str = None) -> Path:
         """
@@ -50,6 +56,7 @@ class Camera:
                 "-t", "1000",  # timeout: 1 second
                 "--width", "1280",
                 "--height", "720",
+                "--rotation", str(self.rotation),
                 "-n",  # don't display preview
             ]
 
@@ -69,6 +76,7 @@ class Camera:
                     "-t", "1000",
                     "-w", "1280",
                     "-h", "720",
+                    "-rot", str(self.rotation),
                     "-n",
                 ]
                 result = subprocess.run(
