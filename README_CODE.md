@@ -34,17 +34,13 @@ Fast, local obstacle detection using OpenCV — no API call, runs every frame.
 - Coarse heuristic, not true depth sensing — thresholds may need tuning per camera/environment
 
 ### `vision_loop.py`
-Main control loop integrating everything.
+Main control loop integrating everything, running as two concurrent threads.
 
 **Key class:** `VisionControlLoop`
-1. Captures image with camera
-2. Runs the reflex check (OpenCV) — if an obstacle is detected right ahead, evades immediately and skips the Claude call for that iteration
-3. Otherwise, sends the frame to Claude via vision API
-4. Claude responds with direction: forward/backward/left/right/stop
-5. Executes the movement
-6. Repeats
+- **Reflex loop** (fast, `--reflex-interval`, default 0.3s): the only thread that touches the camera. Captures a frame, runs the OpenCV obstacle check, and either does a quick evasive turn or keeps driving continuously in the current target direction. No stop-start between ticks — this is what makes driving smooth instead of jerky.
+- **Reasoning loop** (slow, `--reasoning-interval`, default 2.0s): reads the most recently captured frame and asks Claude for a direction toward the goal (currently: navigate toward a roll of duct tape). Updates the target direction the reflex loop drives toward.
 
-This splits responsibilities: OpenCV handles fast "reflexes" (imminent collision avoidance, zero API latency), Claude handles slower "reasoning" (where to explore, when to stop).
+This splits responsibilities: OpenCV handles fast "reflexes" (imminent collision avoidance, zero API latency, motors never fully stop between ticks), Claude handles slower "reasoning" (steering toward the goal, searching when the target isn't visible, stopping when arrived).
 
 **Entry point:** `main()` with CLI arguments
 
@@ -84,7 +80,7 @@ pip install -r requirements.txt
 export ANTHROPIC_API_KEY="your_key_here"
 
 # Run vision loop (real GPIO, real camera)
-python vision_loop.py --iterations 10 --duration 0.5
+python vision_loop.py --iterations 10
 ```
 
 ## Usage
@@ -103,8 +99,11 @@ python test_motors.py --gpio
 # Simulation (mock camera, no GPIO)
 python vision_loop.py --simulate --iterations 5
 
-# Real hardware with 10 iterations, 0.75s per action
-python vision_loop.py --iterations 10 --duration 0.75
+# Real hardware, reasoning every 2s, reflex tick every 0.3s (defaults)
+python vision_loop.py --iterations 10
+
+# Faster reasoning cadence, slower reflex tick
+python vision_loop.py --reasoning-interval 1.0 --reflex-interval 0.5
 
 # Infinite loop (Ctrl+C to stop)
 python vision_loop.py
@@ -116,8 +115,9 @@ python vision_loop.py --help
 ```
 
 Options:
-- `--iterations N`: Run N cycles then stop (default: infinite)
-- `--duration SECS`: How long each movement lasts (default: 0.5)
+- `--iterations N`: Run N Claude reasoning cycles then stop (default: infinite)
+- `--reasoning-interval SECS`: Seconds between Claude calls (default: 2.0)
+- `--reflex-interval SECS`: Seconds between reflex/motor ticks (default: 0.3)
 - `--simulate`: Use simulation mode (mock camera, no GPIO)
 - `--api-key KEY`: Pass API key directly (or use ANTHROPIC_API_KEY env var)
 
@@ -133,13 +133,16 @@ The motor control class detects if `RPi.GPIO` is available. On dev machines with
 Same idea: on non-Pi machines, `camera.py` creates tiny valid JPEG files instead of capturing. This tests the full pipeline (capture → base64 → Claude API → parse) without hardware.
 
 ### Vision API prompt
-The prompt is intentionally simple and strict:
+The prompt currently targets a specific goal — navigating toward a roll of duct tape — and is intentionally strict:
 - Forces Claude to respond with just one direction word
+- Tells Claude to search (turn) when the target isn't visible, and to stop when it fills the frame
 - Avoids explanations that need parsing
-- Can be tuned later by changing the system prompt in `vision_loop.py`
+- Can be tuned later by changing the prompt text in `VisionControlLoop.get_next_action()`
 
-### Movement timing
-Each action runs for `--duration` seconds (default 0.5s), then stops. On carpet, 0.5s is usually enough to see motion. Adjust higher if the car barely moves.
+### Why threads instead of a single loop?
+The old design captured a frame, blocked on a full Claude API round-trip, moved briefly, then stopped — every single cycle. That's inherently stop-and-go. Splitting into a fast reflex thread (drives continuously, reacts to obstacles instantly) and a slow reasoning thread (only updates the *target direction* every couple seconds) means the car keeps moving smoothly while Claude "thinks" in the background.
+
+Only the reflex thread touches the camera, to avoid two threads fighting over the hardware. The reasoning thread reads whatever frame the reflex thread most recently captured.
 
 ## Troubleshooting
 

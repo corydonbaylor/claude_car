@@ -1,7 +1,7 @@
 import os
 import logging
 import sys
-from pathlib import Path
+import threading
 from motor_control import MotorController
 from camera import Camera
 from reflexes import ReflexEngine
@@ -15,21 +15,53 @@ logger = logging.getLogger(__name__)
 
 
 class VisionControlLoop:
-    """Main control loop: capture → Claude vision → decide → move → repeat."""
+    """
+    Continuous control loop split across two threads:
 
-    def __init__(self, use_gpio: bool = True, headless: bool = False):
+    - Reflex loop (fast, no API calls): the only thread that touches the
+      camera. Captures frames on a short tick, checks for an obstacle
+      directly ahead via OpenCV, and either evades it or keeps driving
+      continuously in the current target direction. No stop-start between
+      ticks — this is what removes the jerkiness of the old capture ->
+      Claude -> move -> stop cycle.
+    - Reasoning loop (slow, calls Claude): periodically reads the most
+      recently captured frame and asks Claude to reason about the goal
+      (e.g. navigating toward a roll of duct tape), then updates the
+      target direction the reflex loop drives toward.
+    """
+
+    def __init__(self, use_gpio: bool = True, headless: bool = False,
+                 reasoning_interval: float = 2.0, reflex_interval: float = 0.3):
         """
         Initialize vision control loop.
 
         Args:
             use_gpio: If False, runs in simulation mode (no real GPIO)
             headless: If True, doesn't require display for camera preview
+            reasoning_interval: Seconds between Claude reasoning calls
+            reflex_interval: Seconds between reflex/motor ticks
         """
         self.motor = MotorController(use_gpio=use_gpio)
         self.camera = Camera()
         self.reflex = ReflexEngine()
         self.client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
         self.headless = headless
+        self.reasoning_interval = reasoning_interval
+        self.reflex_interval = reflex_interval
+
+        self.current_action = "stop"
+        self.action_lock = threading.Lock()
+
+        self.latest_image_path = None
+        self.image_lock = threading.Lock()
+
+        self.stop_event = threading.Event()
+
+    def _capture(self):
+        try:
+            return self.camera.capture_image()
+        except FileNotFoundError:
+            return self.camera.mock_capture()
 
     def get_next_action(self, image_base64: str) -> str:
         """
@@ -61,9 +93,13 @@ class VisionControlLoop:
                                 "type": "text",
                                 "text": (
                                     "You are controlling an RC car with a camera. "
-                                    "Look at this image and decide what the car should do next. Move forward when possible. Do not let the car run into anything."
-                                    "Respond with ONLY ONE word from this list: "
-                                    "forward, backward, left, right, or stop. "
+                                    "Your goal is to navigate toward a roll of duct tape. "
+                                    "Look at this image. If you see the duct tape, respond with "
+                                    "the direction that moves the car toward it: 'forward' if it's "
+                                    "roughly centered ahead, 'left' or 'right' if it's off to one side. "
+                                    "If the duct tape fills most of the frame, you've arrived — respond 'stop'. "
+                                    "If you don't see the duct tape anywhere, respond 'left' or 'right' to search for it. "
+                                    "Respond with ONLY ONE word: forward, backward, left, right, or stop. "
                                     "No explanations, just the word."
                                 ),
                             },
@@ -85,63 +121,105 @@ class VisionControlLoop:
             logger.error(f"API error: {e}")
             return "stop"
 
+    def _drive(self, action: str):
+        """Continuously execute an action without blocking or auto-stopping."""
+        if action == "forward":
+            self.motor.forward()
+        elif action == "backward":
+            self.motor.backward()
+        elif action == "left":
+            self.motor.left()
+        elif action == "right":
+            self.motor.right()
+        else:
+            self.motor.stop()
+
+    def _reflex_loop(self):
+        """Fast loop: owns the camera, drives motors continuously, evades obstacles."""
+        while not self.stop_event.is_set():
+            image_path = self._capture()
+            with self.image_lock:
+                self.latest_image_path = image_path
+
+            reflex_result = self.reflex.check(image_path)
+
+            if reflex_result.blocked:
+                logger.info(
+                    f"[Reflex] obstacle ahead, evading {reflex_result.direction} "
+                    f"(densities={reflex_result.edge_densities})"
+                )
+                self.motor.move(reflex_result.direction, duration=0.3)
+            else:
+                with self.action_lock:
+                    action = self.current_action
+                self._drive(action)
+
+            self.stop_event.wait(self.reflex_interval)
+
+    def _reasoning_loop(self, iterations):
+        """Slow loop: asks Claude for the target direction toward the goal."""
+        count = 0
+        while not self.stop_event.is_set():
+            if iterations is not None and count >= iterations:
+                logger.info("Reasoning iteration limit reached, stopping.")
+                self.stop_event.set()
+                break
+
+            with self.image_lock:
+                image_path = self.latest_image_path
+
+            if image_path is None:
+                self.stop_event.wait(0.1)
+                continue
+
+            count += 1
+            image_b64 = self.camera.get_image_base64(image_path)
+
+            logger.info(f"[Reasoning #{count}] Sending frame to Claude...")
+            action = self.get_next_action(image_b64)
+            logger.info(f"[Reasoning #{count}] Claude decided: {action}")
+
+            with self.action_lock:
+                self.current_action = action
+
+            self.stop_event.wait(self.reasoning_interval)
+
     def run(self, iterations: int = None, duration_per_action: float = 0.5):
         """
-        Run the vision control loop.
+        Run the continuous vision control loop.
 
         Args:
-            iterations: Number of action cycles to run. None = infinite.
-            duration_per_action: How long to execute each action (seconds)
+            iterations: Number of Claude reasoning cycles to run. None = infinite.
+            duration_per_action: Unused directly; kept for CLI backward compatibility.
         """
-        logger.info("Starting vision control loop...")
+        logger.info("Starting continuous vision control loop...")
         logger.info(
             f"Configuration: iterations={iterations}, "
-            f"duration={duration_per_action}s, headless={self.headless}"
+            f"reasoning_interval={self.reasoning_interval}s, "
+            f"reflex_interval={self.reflex_interval}s"
         )
 
-        iteration = 0
+        reasoning_thread = threading.Thread(
+            target=self._reasoning_loop, args=(iterations,), daemon=True
+        )
+        reflex_thread = threading.Thread(target=self._reflex_loop, daemon=True)
+
         try:
-            while iterations is None or iteration < iterations:
-                iteration += 1
-                logger.info(f"\n--- Iteration {iteration} ---")
+            reflex_thread.start()
+            reasoning_thread.start()
 
-                # Capture image
-                try:
-                    image_path = self.camera.capture_image()
-                except FileNotFoundError:
-                    logger.info(
-                        "Camera not available (not on Pi). Using mock image."
-                    )
-                    image_path = self.camera.mock_capture()
-
-                # Reflex check: fast local obstacle detection, no API call
-                reflex_result = self.reflex.check(image_path)
-                if reflex_result.blocked:
-                    logger.info(
-                        f"Reflex triggered: evading {reflex_result.direction} "
-                        f"(densities={reflex_result.edge_densities})"
-                    )
-                    self.motor.move(reflex_result.direction, duration=duration_per_action)
-                    continue
-
-                # Encode to base64
-                image_b64 = self.camera.get_image_base64(image_path)
-                logger.info(f"Captured: {image_path.name} ({len(image_b64)} bytes)")
-
-                # Get decision from Claude
-                logger.info("Sending to Claude for vision analysis...")
-                action = self.get_next_action(image_b64)
-                logger.info(f"Claude decided: {action}")
-
-                # Execute action
-                logger.info(f"Executing: {action} for {duration_per_action}s")
-                self.motor.move(action, duration=duration_per_action)
+            while reasoning_thread.is_alive() or reflex_thread.is_alive():
+                reasoning_thread.join(timeout=0.2)
+                reflex_thread.join(timeout=0.2)
 
         except KeyboardInterrupt:
             logger.info("\nInterrupt received, stopping...")
         except Exception as e:
             logger.error(f"Unexpected error: {e}", exc_info=True)
         finally:
+            self.stop_event.set()
+            reasoning_thread.join(timeout=2)
+            reflex_thread.join(timeout=2)
             self.cleanup()
 
     def cleanup(self):
@@ -164,13 +242,25 @@ def main():
         "--iterations",
         type=int,
         default=None,
-        help="Number of control cycles to run (default: infinite until interrupted)",
+        help="Number of Claude reasoning cycles to run (default: infinite until interrupted)",
     )
     parser.add_argument(
         "--duration",
         type=float,
         default=0.5,
-        help="Duration (seconds) for each movement action (default: 0.5)",
+        help="Unused directly; kept for backward compatibility",
+    )
+    parser.add_argument(
+        "--reasoning-interval",
+        type=float,
+        default=2.0,
+        help="Seconds between Claude reasoning calls (default: 2.0)",
+    )
+    parser.add_argument(
+        "--reflex-interval",
+        type=float,
+        default=0.3,
+        help="Seconds between reflex/motor ticks (default: 0.3)",
     )
     parser.add_argument(
         "--simulate",
@@ -195,7 +285,11 @@ def main():
         logger.error("ANTHROPIC_API_KEY environment variable not set")
         sys.exit(1)
 
-    loop = VisionControlLoop(use_gpio=not args.simulate)
+    loop = VisionControlLoop(
+        use_gpio=not args.simulate,
+        reasoning_interval=args.reasoning_interval,
+        reflex_interval=args.reflex_interval,
+    )
     loop.run(iterations=args.iterations, duration_per_action=args.duration)
 
 
