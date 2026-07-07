@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 from motor_control import MotorController
 from camera import Camera
+from reflexes import ReflexEngine
 import anthropic
 
 logging.basicConfig(
@@ -26,6 +27,7 @@ class VisionControlLoop:
         """
         self.motor = MotorController(use_gpio=use_gpio)
         self.camera = Camera()
+        self.reflex = ReflexEngine()
         self.client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
         self.headless = headless
 
@@ -111,6 +113,16 @@ class VisionControlLoop:
                         "Camera not available (not on Pi). Using mock image."
                     )
                     image_path = self.camera.mock_capture()
+
+                # Reflex check: fast local obstacle detection, no API call
+                reflex_result = self.reflex.check(image_path)
+                if reflex_result.blocked:
+                    logger.info(
+                        f"Reflex triggered: evading {reflex_result.direction} "
+                        f"(densities={reflex_result.edge_densities})"
+                    )
+                    self.motor.move(reflex_result.direction, duration=duration_per_action)
+                    continue
 
                 # Encode to base64
                 image_b64 = self.camera.get_image_base64(image_path)

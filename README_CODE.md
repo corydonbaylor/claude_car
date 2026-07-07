@@ -24,15 +24,27 @@ Camera capture using Arducam V2 on Raspberry Pi.
 - Provides `mock_capture()` for testing on dev machines
 - Returns images as base64-encoded JPEG for Claude API
 
+### `reflexes.py`
+Fast, local obstacle detection using OpenCV — no API call, runs every frame.
+
+**Key class:** `ReflexEngine`
+- Runs Canny edge detection on the near-field (bottom half) of the frame, split into left/center/right thirds
+- A close, flat obstacle (wall, box) shows up as unusually low edge density right in front of the car
+- If the center region is blocked, immediately returns an escape direction (toward whichever side has more edge detail / is more open)
+- Coarse heuristic, not true depth sensing — thresholds may need tuning per camera/environment
+
 ### `vision_loop.py`
 Main control loop integrating everything.
 
 **Key class:** `VisionControlLoop`
 1. Captures image with camera
-2. Sends to Claude via vision API
-3. Claude responds with direction: forward/backward/left/right/stop
-4. Executes the movement
-5. Repeats
+2. Runs the reflex check (OpenCV) — if an obstacle is detected right ahead, evades immediately and skips the Claude call for that iteration
+3. Otherwise, sends the frame to Claude via vision API
+4. Claude responds with direction: forward/backward/left/right/stop
+5. Executes the movement
+6. Repeats
+
+This splits responsibilities: OpenCV handles fast "reflexes" (imminent collision avoidance, zero API latency), Claude handles slower "reasoning" (where to explore, when to stop).
 
 **Entry point:** `main()` with CLI arguments
 
