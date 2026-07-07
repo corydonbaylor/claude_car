@@ -133,11 +133,16 @@ The motor control class detects if `RPi.GPIO` is available. On dev machines with
 Same idea: on non-Pi machines, `camera.py` creates tiny valid JPEG files instead of capturing. This tests the full pipeline (capture → base64 → Claude API → parse) without hardware.
 
 ### Vision API prompt
-The prompt currently targets a specific goal — navigating toward a roll of duct tape — and is intentionally strict:
-- Forces Claude to respond with just one direction word
-- Tells Claude to search (turn) when the target isn't visible, and to stop when it fills the frame
-- Avoids explanations that need parsing
-- Can be tuned later by changing the prompt text in `VisionControlLoop.get_next_action()`
+The prompt currently targets a specific goal — navigating toward a shoe — and asks Claude for two lines:
+- `DIRECTION: <word>` — parsed to drive the car
+- `SEEN: <short description>` — not used for driving, just logged via `[Claude sees] ...` so you can check what Claude is actually picking up in the frame
+
+This makes it easy to tell a recognition problem (target not identified despite being visible) apart from a camera problem (target not legible in the captured frame at all) — just tail the logs and compare what Claude reports seeing against what's actually in front of the car.
+
+Tell Claude to search (turn) when the target isn't visible, and to stop when it fills the frame. Can be tuned later by changing the prompt text in `VisionControlLoop.get_next_action()`.
+
+### Why 1280x720 instead of 640x480?
+The original lower resolution made it harder for Claude to pick out small/distant objects (e.g. a duct tape roll blended into the floor). Bumped up in `camera.py` for more detail — if this turns out to slow down capture or the API call too much on the Pi, drop it back down.
 
 ### Why threads instead of a single loop?
 The old design captured a frame, blocked on a full Claude API round-trip, moved briefly, then stopped — every single cycle. That's inherently stop-and-go. Splitting into a fast reflex thread (drives continuously, reacts to obstacles instantly) and a slow reasoning thread (only updates the *target direction* every couple seconds) means the car keeps moving smoothly while Claude "thinks" in the background.

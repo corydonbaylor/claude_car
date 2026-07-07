@@ -48,8 +48,8 @@ class Camera:
                 "rpicam-still",
                 "-o", str(output_path),
                 "-t", "1000",  # timeout: 1 second
-                "--width", "640",
-                "--height", "480",
+                "--width", "1280",
+                "--height", "720",
                 "-n",  # don't display preview
             ]
 
@@ -67,8 +67,8 @@ class Camera:
                     "raspistill",
                     "-o", str(output_path),
                     "-t", "1000",
-                    "-w", "640",
-                    "-h", "480",
+                    "-w", "1280",
+                    "-h", "720",
                     "-n",
                 ]
                 result = subprocess.run(

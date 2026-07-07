@@ -67,6 +67,11 @@ class VisionControlLoop:
         """
         Send image to Claude and get next action.
 
+        Asks for a brief "SEEN:" description alongside the "DIRECTION:" word
+        so we can log what Claude is actually seeing in the frame — useful
+        for telling apart a recognition problem (target not identified) from
+        a camera/resolution problem (target not visible/legible at all).
+
         Args:
             image_base64: Base64-encoded image string
 
@@ -76,7 +81,7 @@ class VisionControlLoop:
         try:
             message = self.client.messages.create(
                 model="claude-haiku-4-5-20251001",
-                max_tokens=100,
+                max_tokens=150,
                 messages=[
                     {
                         "role": "user",
@@ -93,14 +98,15 @@ class VisionControlLoop:
                                 "type": "text",
                                 "text": (
                                     "You are controlling an RC car with a camera. "
-                                    "Your goal is to navigate toward a roll of duct tape. "
-                                    "Look at this image. If you see the duct tape, respond with "
-                                    "the direction that moves the car toward it: 'forward' if it's "
-                                    "roughly centered ahead, 'left' or 'right' if it's off to one side. "
-                                    "If the duct tape fills most of the frame, you've arrived — respond 'stop'. "
-                                    "If you don't see the duct tape anywhere, respond 'left' or 'right' to search for it. "
-                                    "Respond with ONLY ONE word: forward, backward, left, right, or stop. "
-                                    "No explanations, just the word."
+                                    "Your goal is to navigate toward a shoe. "
+                                    "Look at this image. If you see a shoe, pick the direction that moves "
+                                    "the car toward it: 'forward' if it's roughly centered ahead, 'left' or "
+                                    "'right' if it's off to one side. If the shoe fills most of the frame, "
+                                    "you've arrived — pick 'stop'. If you don't see a shoe anywhere, pick "
+                                    "'left' or 'right' to search for it.\n\n"
+                                    "Respond in exactly this format, two lines:\n"
+                                    "DIRECTION: <forward|backward|left|right|stop>\n"
+                                    "SEEN: <one short sentence describing what's in the frame>"
                                 ),
                             },
                         ],
@@ -108,10 +114,22 @@ class VisionControlLoop:
                 ],
             )
 
-            response_text = message.content[0].text.strip().lower()
-            # Extract just the direction word in case Claude adds anything
+            response_text = message.content[0].text.strip()
+
+            seen_text = None
+            direction_line = response_text
+            for line in response_text.splitlines():
+                if line.strip().lower().startswith("seen:"):
+                    seen_text = line.split(":", 1)[1].strip()
+                elif line.strip().lower().startswith("direction:"):
+                    direction_line = line.split(":", 1)[1].strip()
+
+            if seen_text:
+                logger.info(f"[Claude sees] {seen_text}")
+
+            direction_line = direction_line.lower()
             for direction in ["forward", "backward", "left", "right", "stop"]:
-                if direction in response_text:
+                if direction in direction_line:
                     return direction
 
             logger.warning(f"Could not parse Claude response: {response_text}")
