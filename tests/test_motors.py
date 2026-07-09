@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 """
 Simple test script for motor control.
-Run in simulation mode on dev machines, GPIO mode on Raspberry Pi.
+Defaults to real GPIO (auto-falls back to simulation if RPi.GPIO isn't
+available, e.g. on a dev machine). Pass --simulate to force simulation
+even on a Pi.
 """
 
+import os
+import sys
 import time
 import logging
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from motor_control import MotorController
 
 logging.basicConfig(
@@ -15,7 +21,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def test_motors(use_gpio: bool = False):
+def test_motors(use_gpio: bool = True):
     """Test all motor directions."""
     logger.info(f"Starting motor test (GPIO mode: {use_gpio})...")
 
@@ -48,10 +54,10 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Test RC car motors")
     parser.add_argument(
-        "--gpio",
+        "--simulate",
         action="store_true",
-        help="Use real GPIO (requires Raspberry Pi)"
+        help="Force simulation mode, even on a Pi with RPi.GPIO available"
     )
 
     args = parser.parse_args()
-    test_motors(use_gpio=args.gpio)
+    test_motors(use_gpio=not args.simulate)

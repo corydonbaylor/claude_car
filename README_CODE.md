@@ -57,7 +57,7 @@ cp .env.example .env
 # Edit .env and add your ANTHROPIC_API_KEY
 
 # Test motor control in simulation mode
-python test_motors.py
+python tests/test_motors.py --simulate
 
 # Run vision loop in simulation (uses mock camera, no GPIO)
 python vision_loop.py --simulate --iterations 3
@@ -87,11 +87,11 @@ python vision_loop.py --iterations 10
 
 ### Test motors only
 ```bash
-# Simulation mode (dev machine)
-python test_motors.py
+# Real GPIO (Raspberry Pi) — this is the default
+python tests/test_motors.py
 
-# Real GPIO (Raspberry Pi)
-python test_motors.py --gpio
+# Simulation mode (dev machine, or to force simulation on a Pi)
+python tests/test_motors.py --simulate
 ```
 
 ### Run vision control loop
@@ -165,7 +165,7 @@ Check:
 
 ### Car doesn't move
 On Raspberry Pi, check:
-1. All 4 wheels spin when `test_motors.py` runs
+1. All 4 wheels spin when `tests/test_motors.py` runs
 2. Battery is connected and charged
 3. Motor pins are wired to the GPIO numbers in `motor_control.py`
 4. `GPIO.cleanup()` from a prior run isn't still stuck — reboot if stuck
