@@ -48,6 +48,12 @@ Intended mapping:
 
 The board is PCA9685-based (expected I2C address 0x40). The Pi does not drive servo PWM directly; it sends I2C commands and the board generates servo signals.
 
+**Servo calibration (confirmed on physical hardware, 2026-07-09):**
+- Pan channel 0: forward = 90°, left = 0°, right = 180°.
+- Tilt channel 1: forward = 90° (mount was physically readjusted on 2026-07-09 — an earlier reading of 180° no longer applies).
+- Both axes now have forward safely in the middle of the 0-180 range, so normal ± nudges work on both without hitting a limit.
+- `test_pan_tilt.py` and `center_pan_tilt.py` are already updated to use these values.
+
 Camera: Arducam IMX219 on the CSI ribbon, unchanged, known working via picamera2.
 
 ## Test sequence (in order, do not skip gates)

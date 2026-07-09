@@ -20,7 +20,8 @@ logger = logging.getLogger(__name__)
 
 PAN_CHANNEL = 0
 TILT_CHANNEL = 1
-CENTER_ANGLE = 90
+PAN_FORWARD = 90
+TILT_FORWARD = 90  # physically recalibrated on 2026-07-09 — 90 is now forward (0=left, 180=right)
 SMALL_OFFSET = 15  # degrees — small nudge, not a full sweep
 STEP_DELAY = 0.05  # seconds between each 1-degree step, for smooth motion
 
@@ -74,35 +75,35 @@ def main():
         return
 
     logger.info("Connected. Centering both servos first.")
-    kit.servo[PAN_CHANNEL].angle = CENTER_ANGLE
-    kit.servo[TILT_CHANNEL].angle = CENTER_ANGLE
+    kit.servo[PAN_CHANNEL].angle = PAN_FORWARD
+    kit.servo[TILT_CHANNEL].angle = TILT_FORWARD
     time.sleep(0.5)
 
     if not check_throttled():
         return
 
-    # Pan: small nudge one way, back to center
-    move_smoothly(kit, PAN_CHANNEL, CENTER_ANGLE, CENTER_ANGLE + SMALL_OFFSET, "pan")
+    # Pan: small nudge one way, back to forward
+    move_smoothly(kit, PAN_CHANNEL, PAN_FORWARD, PAN_FORWARD + SMALL_OFFSET, "pan")
     time.sleep(0.5)
     if not check_throttled():
         return
 
-    move_smoothly(kit, PAN_CHANNEL, CENTER_ANGLE + SMALL_OFFSET, CENTER_ANGLE, "pan")
+    move_smoothly(kit, PAN_CHANNEL, PAN_FORWARD + SMALL_OFFSET, PAN_FORWARD, "pan")
     time.sleep(0.5)
     if not check_throttled():
         return
 
-    # Tilt: small nudge one way, back to center
-    move_smoothly(kit, TILT_CHANNEL, CENTER_ANGLE, CENTER_ANGLE + SMALL_OFFSET, "tilt")
+    # Tilt: small nudge one way, back to forward
+    move_smoothly(kit, TILT_CHANNEL, TILT_FORWARD, TILT_FORWARD + SMALL_OFFSET, "tilt")
     time.sleep(0.5)
     if not check_throttled():
         return
 
-    move_smoothly(kit, TILT_CHANNEL, CENTER_ANGLE + SMALL_OFFSET, CENTER_ANGLE, "tilt")
+    move_smoothly(kit, TILT_CHANNEL, TILT_FORWARD + SMALL_OFFSET, TILT_FORWARD, "tilt")
     time.sleep(0.5)
     check_throttled()
 
-    logger.info("Done. Both servos back at center.")
+    logger.info("Done. Both servos back at forward position (pan 90°, tilt 90°).")
 
 
 if __name__ == "__main__":
