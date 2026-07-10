@@ -6,7 +6,6 @@ from enum import Enum
 
 from motor_control import MotorController
 from camera import Camera
-from reflexes import ReflexEngine
 from pan_tilt import PanTilt, PAN_FORWARD
 import anthropic
 
@@ -26,45 +25,38 @@ class State(Enum):
 class VisionControlLoop:
     """
     Claude-controlled search-and-approach loop for a shoe, built around a
-    pan-tilt camera mount.
+    pan-tilt camera mount. Exactly three modes:
 
-    - SEARCHING: the car stays fully stopped. The pan-tilt sweeps across a
-      fixed set of angles, capturing a frame and asking Claude "is the shoe
-      here?" at each one. If the full sweep comes up empty, the pan-tilt is
-      re-centered and settled, the car body pivots to a new heading, and
-      the sweep repeats from there.
-    - ALIGNING: once the shoe is found at some pan angle, the camera is
-      re-centered to forward first (and settled), then the car body turns
-      to face the direction the shoe was found in.
-    - APPROACHING: with the shoe roughly dead ahead, the car drives forward
-      continuously — OpenCV reflexes watch every tick for close obstacles —
-      while periodically stopping just long enough for a clean Claude
-      recheck that the shoe is still visible and centered. If it's lost,
-      control returns to SEARCHING.
+    - SEARCHING: the L298N direction pins are held LOW (car fully stopped)
+      for the entire mode — nothing here ever moves the drive motors. The
+      pan-tilt sweeps its five fixed angles, capturing a frame and asking
+      Claude "is the shoe here?" at each one. If none of the five show the
+      shoe, the sweep just repeats from the first angle. As soon as one
+      does, SEARCHING exits immediately for ALIGNING.
+    - ALIGNING: the camera is re-centered to forward first, then the car
+      body turns toward the direction the shoe was found in. After turning,
+      it takes a fresh photo — if the shoe is still in frame, move on to
+      APPROACHING; if not, go back to SEARCHING.
+    - APPROACHING: drive straight forward until interrupted.
 
     Motors and the pan-tilt servos are never actuated at the same time —
-    see the hard rule in handoff.md. self.servo_motor_settle_time is the
-    minimum pause enforced at every handoff between the two subsystems.
+    see the hard rule in handoff.md. Every pan-tilt move goes through
+    _move_pan/_center_camera, which force the motors stopped and settled
+    immediately beforehand, unconditionally.
     """
 
     def __init__(self, use_gpio: bool = True,
-                 reasoning_interval: float = 2.0,
-                 reflex_interval: float = 0.3,
-                 capture_settle_time: float = 0.4,
                  pan_sweep_angles=None,
                  pan_settle_time: float = 0.3,
                  servo_motor_settle_time: float = 0.5,
-                 search_turn_duration: float = 0.6,
+                 capture_settle_time: float = 0.4,
                  body_turn_seconds_per_degree: float = 0.02,
                  max_align_turn_duration: float = 1.5,
-                 align_deadband_degrees: float = 10.0):
+                 align_deadband_degrees: float = 10.0,
+                 approach_tick_interval: float = 0.3):
         """
         Args:
             use_gpio: If False, runs in simulation mode (no real GPIO/servos)
-            reasoning_interval: Seconds between Claude rechecks while approaching
-            reflex_interval: Seconds between reflex/motor ticks while approaching
-            capture_settle_time: Seconds to hold the car still before a
-                reasoning recheck captures a frame, so it isn't motion-blurred
             pan_sweep_angles: Pan angles (degrees) to check during a search
                 sweep, in order. Defaults to 5 positions from 30 to 150.
             pan_settle_time: Seconds to wait after a pan move before
@@ -72,8 +64,9 @@ class VisionControlLoop:
             servo_motor_settle_time: Minimum seconds to pause at every
                 handoff between servos and motors (hard rule; don't go
                 below 500ms — see handoff.md)
-            search_turn_duration: Seconds to pivot the car body when a full
-                pan sweep finds nothing, before sweeping again
+            capture_settle_time: Seconds to pause after the align turn
+                before taking the confirmation photo, so it isn't
+                motion-blurred
             body_turn_seconds_per_degree: Rough estimate of how long the car
                 needs to pivot per degree of pan offset when aligning to a
                 found target. This is a hardware guess — tune on the car.
@@ -81,24 +74,22 @@ class VisionControlLoop:
                 can run, regardless of the computed pan offset
             align_deadband_degrees: If the shoe was found within this many
                 degrees of forward pan, skip the body turn entirely
+            approach_tick_interval: Seconds between forward-drive ticks
+                while approaching
         """
         self.motor = MotorController(use_gpio=use_gpio)
         self.camera = Camera()
-        self.reflex = ReflexEngine()
         self.pan_tilt = PanTilt(use_gpio=use_gpio)
         self.client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-
-        self.reasoning_interval = reasoning_interval
-        self.reflex_interval = reflex_interval
-        self.capture_settle_time = capture_settle_time
 
         self.pan_sweep_angles = pan_sweep_angles or [30, 60, 90, 120, 150]
         self.pan_settle_time = pan_settle_time
         self.servo_motor_settle_time = max(servo_motor_settle_time, 0.5)
-        self.search_turn_duration = search_turn_duration
+        self.capture_settle_time = capture_settle_time
         self.body_turn_seconds_per_degree = body_turn_seconds_per_degree
         self.max_align_turn_duration = max_align_turn_duration
         self.align_deadband_degrees = align_deadband_degrees
+        self.approach_tick_interval = approach_tick_interval
 
         self.state = State.SEARCHING
         self.found_pan_angle = None
@@ -199,19 +190,7 @@ class VisionControlLoop:
             logger.error(f"Error observing frame: {e}", exc_info=True)
             return False, "none", None
 
-    def _drive(self, action: str):
-        if action == "forward":
-            self.motor.forward()
-        elif action == "backward":
-            self.motor.backward()
-        elif action == "left":
-            self.motor.left()
-        elif action == "right":
-            self.motor.right()
-        else:
-            self.motor.stop()
-
-    # -- servo/motor guard ------------------------------------------------
+    # -- servo/motor guard --------------------------------------------------
 
     def _move_pan(self, angle: float):
         """
@@ -240,11 +219,13 @@ class VisionControlLoop:
 
     def _search_sweep(self):
         """
-        Sweep the pan-tilt across self.pan_sweep_angles while the car stays
-        fully stopped, checking each frame with Claude.
+        Sweep the pan-tilt across self.pan_sweep_angles. The drive motors
+        are never touched here except to hold them stopped (via _move_pan's
+        guard) — the car does not move at all during search.
 
         Returns the pan angle (degrees) the shoe was found at, or None if
-        the full sweep came up empty (or the iteration budget ran out).
+        the full sweep came up empty (or the iteration budget ran out) —
+        the caller just calls this again to keep sweeping.
         """
         for angle in self.pan_sweep_angles:
             if not self._consume_tick():
@@ -262,33 +243,22 @@ class VisionControlLoop:
                 logger.info(f"[Search] shoe found at pan={angle}° (position in frame: {position})")
                 return angle
 
-        logger.info("[Search] full sweep found nothing")
+        logger.info("[Search] full sweep found nothing, sweeping again")
         return None
-
-    def _rotate_and_continue_search(self):
-        """
-        Full sweep came up empty. Re-center the pan-tilt, settle, pivot the
-        car body to a new heading, settle again, then let the next loop
-        pass re-sweep from there.
-        """
-        self._center_camera()
-        time.sleep(self.servo_motor_settle_time)
-
-        logger.info(f"[Search] rotating body to search a new heading ({self.search_turn_duration}s turn)")
-        self.motor.move("left", duration=self.search_turn_duration)
-
-        time.sleep(self.servo_motor_settle_time)
 
     # -- ALIGNING ---------------------------------------------------------
 
-    def _align_to_target(self, found_pan_angle: float):
+    def _align_to_target(self, found_pan_angle: float) -> bool:
         """
-        Re-center the camera to forward first, then turn the car body to
-        face the direction the shoe was found in.
+        Re-center the camera to forward, turn the car body toward the
+        direction the shoe was found in, then take a fresh photo to confirm
+        the shoe is still in frame.
+
+        Returns True if the shoe is confirmed in frame (ready to approach),
+        False if it's not (caller should go back to SEARCHING).
         """
         logger.info("[Align] re-centering camera to forward")
         self._center_camera()
-        time.sleep(self.servo_motor_settle_time)
 
         offset = found_pan_angle - PAN_FORWARD  # negative = shoe was left, positive = right
 
@@ -298,66 +268,31 @@ class VisionControlLoop:
             direction = "left" if offset < 0 else "right"
             turn_duration = min(abs(offset) * self.body_turn_seconds_per_degree, self.max_align_turn_duration)
             logger.info(f"[Align] turning {direction} for {turn_duration:.2f}s to face target (pan offset {offset}°)")
-            self.motor.move(direction, duration=turn_duration)
+            self.motor.move(direction, duration=turn_duration)  # blocks, then stops itself
 
-        time.sleep(self.servo_motor_settle_time)
+        time.sleep(self.capture_settle_time)
+
+        logger.info("[Align] checking whether the shoe is still in frame after turning")
+        image_path = self._capture()
+        image_b64 = self.camera.get_image_base64(image_path)
+        found, position, _ = self._observe(image_b64)
+
+        if found:
+            logger.info(f"[Align] shoe confirmed in frame (position={position}), moving to approach")
+        else:
+            logger.info("[Align] shoe not in frame after turning, returning to search")
+
+        return found
 
     # -- APPROACHING ------------------------------------------------------
 
-    def _approach_loop(self) -> bool:
-        """
-        Drive toward the shoe: reflex ticks keep the car moving and dodge
-        obstacles, while periodic clean captures ask Claude to confirm the
-        shoe is still visible and steer toward it.
-
-        Returns False once the shoe is lost (or the iteration budget runs
-        out) so the caller can fall back to SEARCHING.
-        """
-        current_action = "forward"
-        last_check = 0.0
-
-        while True:
-            if not self._consume_tick():
-                self.motor.stop()
-                return False
-
-            now = time.time()
-            if now - last_check >= self.reasoning_interval:
-                self.motor.stop()
-                time.sleep(self.capture_settle_time)
-
-                image_path = self._capture()
-                image_b64 = self.camera.get_image_base64(image_path)
-                found, position, _ = self._observe(image_b64)
-                last_check = time.time()
-
-                if not found:
-                    logger.info("[Approach] lost sight of the shoe, returning to search")
-                    self.motor.stop()
-                    return False
-
-                if position == "center":
-                    current_action = "forward"
-                elif position == "left":
-                    current_action = "left"
-                elif position == "right":
-                    current_action = "right"
-                else:
-                    current_action = "stop"
-            else:
-                image_path = self._capture()
-                reflex_result = self.reflex.check(image_path)
-
-                if reflex_result.blocked:
-                    logger.info(
-                        f"[Reflex] obstacle ahead, evading {reflex_result.direction} "
-                        f"(densities={reflex_result.edge_densities})"
-                    )
-                    self.motor.move(reflex_result.direction, duration=0.3)
-                else:
-                    self._drive(current_action)
-
-                time.sleep(self.reflex_interval)
+    def _approach(self):
+        """Drive straight forward toward the shoe until interrupted (Ctrl+C or --iterations budget)."""
+        logger.info("[Approach] driving forward")
+        while self._consume_tick():
+            self.motor.forward()
+            time.sleep(self.approach_tick_interval)
+        self.motor.stop()
 
     # -- main loop --------------------------------------------------------
 
@@ -385,17 +320,13 @@ class VisionControlLoop:
                     if found_angle is not None:
                         self.found_pan_angle = found_angle
                         self.state = State.ALIGNING
-                    else:
-                        self._rotate_and_continue_search()
 
                 elif self.state == State.ALIGNING:
-                    self._align_to_target(self.found_pan_angle)
-                    self.state = State.APPROACHING
+                    shoe_in_frame = self._align_to_target(self.found_pan_angle)
+                    self.state = State.APPROACHING if shoe_in_frame else State.SEARCHING
 
                 elif self.state == State.APPROACHING:
-                    still_tracking = self._approach_loop()
-                    if not still_tracking:
-                        self.state = State.SEARCHING
+                    self._approach()
 
         except KeyboardInterrupt:
             logger.info("\nInterrupt received, stopping...")
@@ -430,24 +361,6 @@ def main():
         help="Number of Claude/action ticks to run in total (default: infinite until interrupted)",
     )
     parser.add_argument(
-        "--reasoning-interval",
-        type=float,
-        default=2.0,
-        help="Seconds between Claude rechecks while approaching (default: 2.0)",
-    )
-    parser.add_argument(
-        "--reflex-interval",
-        type=float,
-        default=0.3,
-        help="Seconds between reflex/motor ticks while approaching (default: 0.3)",
-    )
-    parser.add_argument(
-        "--capture-settle",
-        type=float,
-        default=0.4,
-        help="Seconds to hold the car still before each reasoning recheck, to avoid motion blur (default: 0.4)",
-    )
-    parser.add_argument(
         "--pan-settle",
         type=float,
         default=0.3,
@@ -458,6 +371,18 @@ def main():
         type=float,
         default=0.5,
         help="Minimum seconds to pause at every servo/motor handoff (default: 0.5, don't go lower)",
+    )
+    parser.add_argument(
+        "--capture-settle",
+        type=float,
+        default=0.4,
+        help="Seconds to pause after the align turn before the confirmation photo (default: 0.4)",
+    )
+    parser.add_argument(
+        "--approach-tick",
+        type=float,
+        default=0.3,
+        help="Seconds between forward-drive ticks while approaching (default: 0.3)",
     )
     parser.add_argument(
         "--simulate",
@@ -482,11 +407,10 @@ def main():
 
     loop = VisionControlLoop(
         use_gpio=not args.simulate,
-        reasoning_interval=args.reasoning_interval,
-        reflex_interval=args.reflex_interval,
-        capture_settle_time=args.capture_settle,
         pan_settle_time=args.pan_settle,
         servo_motor_settle_time=args.servo_motor_settle,
+        capture_settle_time=args.capture_settle,
+        approach_tick_interval=args.approach_tick,
     )
     loop.run(iterations=args.iterations)
 
