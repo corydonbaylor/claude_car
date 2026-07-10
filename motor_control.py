@@ -102,7 +102,7 @@ class MotorController:
         # Enable both channels at full speed by default
         self.gpio.output(ENA, self.gpio.HIGH)
         self.gpio.output(ENB, self.gpio.HIGH)
-        logger.info("GPIO initialized")
+        logger.info("GPIO initialized (pincheck v2, drive-aware)")
         self._log_hardware_pin_states(expected=None)
 
     def _log_hardware_pin_states(self, expected=None):
