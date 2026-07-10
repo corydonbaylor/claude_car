@@ -2,8 +2,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-PAN_CHANNEL = 0
-TILT_CHANNEL = 1
+PAN_CHANNEL = 1
+TILT_CHANNEL = 0
 
 # Calibrated on hardware 2026-07-09: for both axes, 0=left/down, 180=right/up,
 # 90=forward. See handoff.md before changing these.

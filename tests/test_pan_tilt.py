@@ -18,8 +18,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-PAN_CHANNEL = 0
-TILT_CHANNEL = 1
+PAN_CHANNEL = 1
+TILT_CHANNEL = 0
 PAN_FORWARD = 90
 TILT_FORWARD = 90  # physically recalibrated on 2026-07-09 — 90 is now forward (0=left, 180=right)
 SMALL_OFFSET = 15  # degrees — small nudge, not a full sweep

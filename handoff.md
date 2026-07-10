@@ -58,7 +58,7 @@ Raspberry Pi 4 (4GB), powered by its own dedicated USB-C 5V/3A supply — untouc
 
 - Board is PCA9685-based, I2C address `0x40`. Pi sends I2C commands; the board generates the actual servo PWM signals — Pi does not drive servo signal pins directly.
 - Servos: GH-S37D digital servos, rated 3.6V-4.8V, <350mA each (~700mA combined worst case). Running slightly above nameplate spec off the Pi's 5V rail — accepted tradeoff, not flagged as a bug.
-- **Servo channel assignment**: channel 0 = pan, channel 1 = tilt (confirmed via physical testing).
+- **Servo channel assignment**: channel 1 = pan (left/right), channel 0 = tilt (up/down). Earlier physical testing (2026-07-09) had these backwards — channel 0 was labeled "pan" but actually swivels the camera up/down. Corrected 2026-07-10 after confirming channel 0 tilts rather than pans on the real mount. If the mount is ever unwired/rewired, re-verify which channel does which before trusting this.
 - **Calibration (confirmed on hardware, 2026-07-09)**: pan forward = 90° (0°=left, 180°=right). Tilt forward = 90° (mount was physically adjusted to get here — an earlier reading of 180° no longer applies). Both axes have forward safely in the middle of the 0-180 range.
 
 ### Hard rule: never actuate servos and motors at the same time

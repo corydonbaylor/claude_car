@@ -19,8 +19,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-PAN_CHANNEL = 0
-TILT_CHANNEL = 1
+PAN_CHANNEL = 1
+TILT_CHANNEL = 0
 
 
 def check_throttled():
