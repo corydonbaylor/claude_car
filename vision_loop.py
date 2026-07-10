@@ -222,6 +222,7 @@ class VisionControlLoop:
         the full sweep came up empty (or the iteration budget ran out).
         """
         self.motor.stop()
+        time.sleep(self.servo_motor_settle_time)
 
         for angle in self.pan_sweep_angles:
             if not self._consume_tick():
