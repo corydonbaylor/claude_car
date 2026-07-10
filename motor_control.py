@@ -22,8 +22,10 @@ def read_hardware_pin_states():
     the pin really is, independent of what RPi.GPIO believes it set —
     added to debug motors running while software commands stop.
 
-    Returns {bcm_pin: (mode, level)} with mode 'op'/'ip' and level
-    'hi'/'lo', or None if no readback tool is available (dev machine).
+    Returns {bcm_pin: (mode, level, drive)} with mode 'op'/'ip', level
+    'hi'/'lo' (measured), and drive 'dh'/'dl' (what the SoC is commanding,
+    pinctrl only — None otherwise). Returns None if no readback tool is
+    available (dev machine).
     """
     try:
         result = subprocess.run(
@@ -32,8 +34,14 @@ def read_hardware_pin_states():
         )
         if result.returncode == 0 and result.stdout.strip():
             states = {}
-            for match in re.finditer(r"^\s*(\d+):\s+(\w+).*?\|\s+(hi|lo)", result.stdout, re.MULTILINE):
-                states[int(match.group(1))] = (match.group(2), match.group(3))
+            # e.g. "18: op dh pn | hi // GPIO18 = output" — 'dh'/'dl' is the
+            # level the SoC is *commanding*, 'hi'/'lo' after the bar is what
+            # the pin actually *measures*. Drive low + measure high = an
+            # external source is overpowering the pin.
+            for match in re.finditer(
+                r"^\s*(\d+):\s+(\w+)(?:\s+(d[hl]))?.*?\|\s+(hi|lo)", result.stdout, re.MULTILINE
+            ):
+                states[int(match.group(1))] = (match.group(2), match.group(4), match.group(3))
             if states:
                 return states
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -46,9 +54,11 @@ def read_hardware_pin_states():
         )
         if result.returncode == 0 and result.stdout.strip():
             states = {}
+            # raspi-gpio can't report commanded drive separately, so that
+            # slot is None here.
             for match in re.finditer(r"GPIO (\d+): level=(\d).*?func=(\w+)", result.stdout):
                 mode = "op" if match.group(3).upper() == "OUTPUT" else "ip"
-                states[int(match.group(1))] = (mode, "hi" if match.group(2) == "1" else "lo")
+                states[int(match.group(1))] = (mode, "hi" if match.group(2) == "1" else "lo", None)
             if states:
                 return states
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -110,12 +120,13 @@ class MotorController:
             return
 
         summary = " ".join(
-            f"{PIN_NAMES[p]}/GPIO{p}={states[p][1]}({states[p][0]})"
+            f"{PIN_NAMES[p]}/GPIO{p}={states[p][1]}({states[p][0]}"
+            + (f",{states[p][2]}" if states[p][2] else "") + ")"
             for p in PINS if p in states
         )
         logger.info(f"[PINCHECK] measured at header: {summary}")
 
-        for pin, (mode, level) in states.items():
+        for pin, (mode, level, drive) in states.items():
             if mode != "op":
                 logger.warning(
                     f"[PINCHECK] {PIN_NAMES.get(pin, pin)}/GPIO{pin} is in INPUT mode (floating) "
@@ -124,12 +135,31 @@ class MotorController:
 
         if expected:
             for pin, want_high in expected.items():
-                if pin in states and (states[pin][1] == "hi") != bool(want_high):
-                    logger.error(
-                        f"[PINCHECK] MISMATCH on {PIN_NAMES.get(pin, pin)}/GPIO{pin}: "
-                        f"software commanded {'HIGH' if want_high else 'LOW'} "
-                        f"but the pin measures {states[pin][1]}"
-                    )
+                if pin not in states:
+                    continue
+                mode, level, drive = states[pin]
+                if (level == "hi") != bool(want_high):
+                    name = PIN_NAMES.get(pin, pin)
+                    commanded = "HIGH" if want_high else "LOW"
+                    if drive == "dl" and level == "hi":
+                        # The SoC is actively driving low yet the pin sits
+                        # high: an external source is overpowering the pin.
+                        logger.error(
+                            f"[PINCHECK] MISMATCH on {name}/GPIO{pin}: SoC is DRIVING LOW (dl) but the "
+                            f"pin measures hi — something EXTERNAL is pulling this line up (likely a "
+                            f"short to 5V in the wiring; power down and inspect)"
+                        )
+                    elif drive == "dh" and not want_high:
+                        logger.error(
+                            f"[PINCHECK] MISMATCH on {name}/GPIO{pin}: software commanded LOW but the "
+                            f"SoC's own drive register is HIGH (dh) — the GPIO write is not taking "
+                            f"effect (another process/driver owns this pin?)"
+                        )
+                    else:
+                        logger.error(
+                            f"[PINCHECK] MISMATCH on {name}/GPIO{pin}: software commanded {commanded} "
+                            f"but the pin measures {level}" + (f" (drive={drive})" if drive else "")
+                        )
 
     def _set_pins(self, in1, in2, in3, in4, label=""):
         """
