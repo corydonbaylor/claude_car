@@ -1,106 +1,108 @@
-# Handoff: Pan-Tilt Integration Test
+# Handoff: Claude-Controlled RC Car — Full Project State
 
-## Scope
+## What this project is
 
-One job: verify everything on the car still works after the Arducam Pan Tilt Platform (SKU B0283) was wired in, and that the new pan-tilt works. This is a test session, not a feature-building session.
+A Raspberry Pi 4 RC car with a camera, driven by a Claude vision loop, with a pan-tilt camera mount added on top. Two decision-making layers: OpenCV handles fast local obstacle avoidance ("reflexes"), Claude handles slower goal-directed reasoning (currently: find and approach a shoe).
 
-## Hard rule: never actuate the servos and the L298N motors at the same time
+Repo: git repo at this directory. SSH into the car: `ssh pi@192.168.1.95`.
 
-The pan-tilt servos are powered from the Pi's 5V rail (Pin 4). The power budget covers each load individually but the margin for simultaneous worst-case draw is thin. Therefore:
+---
 
-- Never send motor commands while a servo move is in progress.
-- Never command a servo move while motors are running.
-- Every test script must stop and settle one subsystem (motors fully stopped via GPIO low + enable off, or servos idle for >= 500ms after last move) before touching the other.
-- If writing any combined routine (e.g. "look around then drive"), enforce this with explicit sequencing: servo move -> wait for completion + 500ms -> motor action -> full stop -> next servo move. No overlap, no exceptions.
-- Do not "fix" this constraint or optimize it away, even if tests pass. It is a deliberate power-budget rule, not a bug.
+## Repo structure
 
-## Hardware state
+| File | Purpose |
+|---|---|
+| `motor_control.py` | `MotorController` class — GPIO control for the 4 drive motors via L298N. Simulation mode auto-fallback if `RPi.GPIO` isn't installed. |
+| `camera.py` | `Camera` class — captures via `rpicam-still`/`raspistill`, `rotation=180` (camera is physically mounted upside-down), clears `captures/` on each run. |
+| `reflexes.py` | `ReflexEngine` — Canny edge density check on the near-field of each frame; triggers an evasive turn if an obstacle is detected directly ahead. No API call, runs every tick. |
+| `vision_loop.py` | `VisionControlLoop` — two threads: a fast reflex/drive loop (~0.3s tick, owns the camera, drives continuously) and a slow reasoning loop (~2s tick, stops the car, settles, captures a clean frame, asks Claude for a direction). Current goal: find a shoe. Claude reports structured observations (`FOUND`, `POSITION`) rather than picking a direction itself — direction is derived deterministically in code. |
+| `center_pan_tilt.py` | Calibration utility — holds the pan-tilt servos at a given angle (default 90/90) so the mount/horn can be physically adjusted. PCA9685 keeps outputting the signal after the script exits. |
+| `tests/test_motors.py` | Drives through forward/backward/left/right/stop. Defaults to real GPIO; pass `--simulate` to force simulation. |
+| `tests/test_pan_tilt.py` | Small, cautious pan-tilt servo test (±15° nudges only), checks `vcgencmd get_throttled` after every move, aborts on any undervoltage signal. |
+| `requirements.txt` | `anthropic`, `opencv-python-headless`, `numpy`, `RPi.GPIO`, `adafruit-circuitpython-servokit` |
+| `README_CODE.md` | Usage/setup instructions for the motor+camera+vision-loop side of the project. |
 
-### Pi power
+---
 
-Pi is powered by USB-C from a 5V/3A brick (MacBook charger, 5V profile confirmed). Motors are powered by a separate 4xAA battery pack through the L298N — motor current never touches the Pi.
+## Confirmed hardware state
 
-### Motor wiring (pre-existing, known working)
+### Pi
 
-| Physical Pin | Function                                        |
-| ------------ | ----------------------------------------------- |
-| Pin 2        | 5V -> L298N logic terminal                      |
-| Pin 6        | GND -> L298N GND (shared with battery negative) |
-| Pin 11       | GPIO17 -> IN2 (right backward)                  |
-| Pin 12       | GPIO18 -> IN1 (right forward)                   |
-| Pin 13       | GPIO27 -> IN4 (left backward)                   |
-| Pin 15       | GPIO22 -> IN3 (left forward)                    |
-| Pin 18       | GPIO24 -> ENB (left enable)                     |
-| Pin 22       | GPIO25 -> ENA (right enable)                    |
+Raspberry Pi 4 (4GB), powered by its own dedicated USB-C 5V/3A supply — untouched by anything else in this build.
 
-L298N 5V-EN jumper is removed (deliberate — do not suggest re-bridging it).
+### Motors / L298N (original build, tested, working)
 
-### Pan-tilt wiring (new, NOT yet visually verified — see Gate 0)
+| Physical Pin | Function |
+|---|---|
+| Pin 2 | 5V → L298N logic terminal ("+5V") |
+| Pin 6 | GND → L298N GND (shared with battery negative) |
+| Pin 11 | GPIO17 → IN2 (right backward) |
+| Pin 12 | GPIO18 → IN1 (right forward) |
+| Pin 13 | GPIO27 → IN4 (left backward) |
+| Pin 15 | GPIO22 → IN3 (left forward) |
+| Pin 18 | GPIO24 → ENB (left enable) |
+| Pin 22 | GPIO25 → ENA (right enable) |
 
-Intended mapping:
+- Battery: 4x AA Duracell alkaline, ~6.0-6.4V fresh, wired into the L298N's 12V terminal for motor power.
+- L298N 5V-EN jumper is **removed/open** — deliberate, because the battery voltage doesn't give the onboard regulator enough headroom to work reliably. Logic power comes from the Pi instead. **Do not re-bridge this jumper without also disconnecting the Pi 5V wire** — having both at once means two regulators fighting for the same node (evaluated as a hypothetical in a separate conversation; not the actual state of this build, just don't combine them).
 
-| Wire                  | Pi Physical Pin         |
-| --------------------- | ----------------------- |
-| Servo board power (+) | Pin 4 (5V)              |
-| Servo board GND       | Pin 9 (GND)             |
-| SDA                   | Pin 3 (GPIO2, I2C1 SDA) |
-| SCL                   | Pin 5 (GPIO3, I2C1 SCL) |
+### Pan-tilt (Arducam Pan Tilt Platform, SKU B0283)
 
-The board is PCA9685-based (expected I2C address 0x40). The Pi does not drive servo PWM directly; it sends I2C commands and the board generates servo signals.
+| Wire | Pi Physical Pin |
+|---|---|
+| Servo board power (+) | Pin 4 (5V — same internal rail as Pin 2, see power budget note below) |
+| Servo board GND | Pin 9 (GND) |
+| SDA | Pin 3 (GPIO2, I2C1 SDA) |
+| SCL | Pin 5 (GPIO3, I2C1 SCL) |
 
-**Servo calibration (confirmed on physical hardware, 2026-07-09):**
-- Pan channel 0: forward = 90°, left = 0°, right = 180°.
-- Tilt channel 1: forward = 90° (mount was physically readjusted on 2026-07-09 — an earlier reading of 180° no longer applies).
-- Both axes now have forward safely in the middle of the 0-180 range, so normal ± nudges work on both without hitting a limit.
-- `tests/test_pan_tilt.py` and `center_pan_tilt.py` are already updated to use these values.
+- Board is PCA9685-based, I2C address `0x40`. Pi sends I2C commands; the board generates the actual servo PWM signals — Pi does not drive servo signal pins directly.
+- Servos: GH-S37D digital servos, rated 3.6V-4.8V, <350mA each (~700mA combined worst case). Running slightly above nameplate spec off the Pi's 5V rail — accepted tradeoff, not flagged as a bug.
+- **Servo channel assignment**: channel 0 = pan, channel 1 = tilt (confirmed via physical testing).
+- **Calibration (confirmed on hardware, 2026-07-09)**: pan forward = 90° (0°=left, 180°=right). Tilt forward = 90° (mount was physically adjusted to get here — an earlier reading of 180° no longer applies). Both axes have forward safely in the middle of the 0-180 range.
 
-Camera: Arducam IMX219 on the CSI ribbon, unchanged, known working via picamera2.
+### Hard rule: never actuate servos and motors at the same time
 
-## Test sequence (in order, do not skip gates)
+The pan-tilt servos and the L298N's logic terminal both ultimately draw from the Pi's single internal 5V rail (Pin 2 and Pin 4 are the same rail, not independent supplies). Combined worst-case draw is thin against the Pi's safe GPIO 5V budget. Mitigation, not a bug:
 
-### Gate 0 — wiring verification before anything else
+- Never send motor commands while a servo move is in progress, and vice versa.
+- Every routine must fully settle one subsystem (motors stopped, or servos idle ≥500ms after last move) before touching the other.
+- Any combined routine (e.g. "look around then drive") must sequence explicitly: servo move → settle 500ms → motor action → full stop → next servo move. No overlap.
+- Do not "optimize" this away even if tests pass without it.
 
-The physical pin mapping above was intended but never visually confirmed against the header. Before running any code that powers servos:
+---
 
-1. Ask the user to confirm they have double-checked the four pan-tilt wires against the table above (or had the photo verified).
-2. Run `sudo i2cdetect -y 1`. Expected: device at `40`. If the grid is empty, STOP — wiring is wrong, do not proceed, report back.
+## Confirmed working / tested
 
-### Test 1 — baseline: nothing regressed
+- Motors: all 4 directions confirmed via `tests/test_motors.py` on real hardware.
+- Camera: capture + rotation fix confirmed (image was upside-down, fixed with `rotation=180`).
+- Pan-tilt I2C link: `sudo i2cdetect -y 1` shows device at `0x40`.
+- Pan-tilt small movements: `tests/test_pan_tilt.py` ran clean — pan and tilt both nudge ±15° and return, zero `vcgencmd get_throttled` events throughout.
+- Pan-tilt calibration: physically adjusted and confirmed, both axes forward = 90°.
+- Vision loop pipeline: exercised in simulation mode locally (mock camera, dummy key) — full capture → reflex check → reasoning → action cycle runs without crashing. Not yet stress-tested for extended real-world runs.
 
-1. Confirm the Pi boots clean and `vcgencmd get_throttled` returns `throttled=0x0`.
-2. Camera: capture a single frame via the existing picamera2 path. Confirm non-black image.
-3. Motors (servos untouched): run the existing `forward.py` briefly (~1s). Confirm motion, confirm clean stop, all GPIO released.
+## Not yet done — natural next steps
 
-### Test 2 — servos alone (motors fully stopped)
+1. **Pan-tilt full range-of-motion sweep** (only small ±15° nudges have been tested so far).
+2. **Alternated servo/motor test** — pan → settle → drive → stop → pan the other way → settle → drive → stop, checking `vcgencmd get_throttled` throughout. Validates the hard-rule sequencing under realistic combined usage.
+3. **Camera + servo integration test** — capture frames at pan left/center/right, confirm three distinct viewpoints. This is what actually proves the pan-tilt is useful for the vision loop, not just that it moves.
+4. **Wire the pan-tilt into `vision_loop.py`** — currently the vision loop only drives the car; it doesn't use the pan-tilt to look around. Not built yet.
+5. Personality add-ons from the original hardware handoff (OLED face display, mic/speaker) — not purchased/wired.
 
-1. Small moves first: command pan to center, then +-20 degrees, then center. Then tilt the same. Watch for jitter or stalling.
-2. After each move, check `vcgencmd get_throttled`. Any nonzero value = undervoltage event = STOP and report. This is the primary failure signal for the power budget.
-3. Then full-range sweep, slowly. The camera ribbon must stay slack through the whole range — user should watch it during this test.
+---
 
-### Test 3 — alternated operation (the realistic usage pattern)
+## Key lessons & gotchas (read before touching wiring or GPIO assignments)
 
-Sequence, with full stops between phases: pan left -> settle -> drive forward 1s -> full stop -> pan right -> settle -> drive backward 1s -> full stop -> center servos.
+- **Physical pin number ≠ GPIO/BCM number.** Always specify which one a diagram means.
+- **The Pi has exactly one internal 5V rail.** Pin 2 and Pin 4 are the same node, not independent budgets — anything drawing from either is drawing from the same source. Keep combined GPIO 5V draw modest (rough community guidance: ~200mA comfortable, ~700mA hard ceiling on some Pi models' combined USB+GPIO fuse).
+- **Never tie two active voltage regulators to the same output node** (e.g. L298N onboard regulator + external 5V feed at once) — they'll fight for control of the node continuously, not just during load transients.
+- **Camera is mounted upside-down** — `rotation=180` in `camera.py` compensates. If a captured image ever looks inverted again, check this hasn't regressed before assuming a wiring problem.
+- **Servo calibration is mount-specific and was found by physical trial** (attach horn, test, detach, readjust) — not something to assume from a datasheet. If servos are ever unmounted/remounted, recheck center position with `center_pan_tilt.py` before trusting angle math elsewhere.
+- **`tests/test_motors.py` defaults to real GPIO** (not simulation) — pass `--simulate` to force simulation on a dev machine.
+- Alkaline battery sag caused a real undervoltage debugging incident earlier in this build — traced to a wiring short (loose/stray wire at a screw terminal), not a genuine overload. Resolved; mentioned here so a repeat undervoltage symptom isn't assumed to be the same root cause without checking.
 
-- Check `vcgencmd get_throttled` after the full sequence.
-- Confirm no camera glitches, no I2C errors, no motor misbehavior at any point.
+## Environment / setup
 
-### Test 4 — camera + servo integration
-
-Capture a frame at pan left, center, and right. Confirm three distinct viewpoints. This proves the pan-tilt does its actual job for the vision loop.
-
-## Failure signals to watch for throughout
-
-- `vcgencmd get_throttled` nonzero -> undervoltage; stop, report which test triggered it.
-- I2C errors / device 0x40 disappearing mid-session -> loose wiring; stop.
-- Servo jitter or hum at idle -> report but continue cautiously.
-- Any lightning-bolt icon if a display is attached -> same as throttled flag.
-
-## Environment notes
-
-- Existing motor code and repo layout: see README_CODE.md in the repo.
-- Servo control: use a PCA9685 library (e.g. adafruit-circuitpython-servokit or adafruit-circuitpython-pca9685). Install whatever is missing; the pan-tilt has never been driven from this Pi before, so no library is assumed present.
-- GH-S37D servos: operating range 3.6-4.8V, they are being run at 5V from the Pi rail per Arducam's own quick-start wiring. Slightly above nameplate spec by design of the kit — do not flag this as a problem, but keep movements slow and smooth; no rapid full-range slams.
-
-## Out of scope
-
-Vision-loop changes, obstacle avoidance, any refactoring of working motor code, any performance optimization. Test, report, done.
+- SSH: `ssh pi@192.168.1.95`
+- Python env on the Pi: `venv` at `~/claude_car/venv` (externally-managed-environment on this OS, so a venv is required, not optional).
+- `ANTHROPIC_API_KEY` is exported via `~/.bashrc` on the Pi (persists across sessions).
+- Dependencies: `pip install -r requirements.txt` after activating the venv.
