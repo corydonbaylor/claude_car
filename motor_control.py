@@ -49,12 +49,20 @@ class MotorController:
         self.gpio.output(ENB, self.gpio.HIGH)
         logger.info("GPIO initialized")
 
-    def _set_pins(self, in1, in2, in3, in4):
-        """Set individual motor direction pins (internal helper)."""
+    def _set_pins(self, in1, in2, in3, in4, label=""):
+        """
+        Set individual motor direction pins (internal helper).
+
+        Logs at INFO (not DEBUG) unconditionally, including on real GPIO —
+        this is the one place that knows the actual pin values being
+        written, so it's the ground truth for "are the motors moving right
+        now." vision_loop.py's logging.basicConfig runs at INFO, so a
+        DEBUG-level log here would be silently dropped and this class would
+        be a black box from the log output alone.
+        """
+        logger.info(f"[MOTOR] {label} -> IN1={int(in1)} IN2={int(in2)} IN3={int(in3)} IN4={int(in4)}")
+
         if not self.use_gpio or not self.gpio:
-            # Simulation: just log
-            state = f"IN1={in1} IN2={in2} IN3={in3} IN4={in4}"
-            logger.debug(f"GPIO state: {state}")
             return
 
         self.gpio.output(IN1, in1)
@@ -68,9 +76,9 @@ class MotorController:
             self.gpio.HIGH if self.use_gpio else True,   # IN1
             self.gpio.LOW if self.use_gpio else False,   # IN2
             self.gpio.HIGH if self.use_gpio else True,   # IN3
-            self.gpio.LOW if self.use_gpio else False    # IN4
+            self.gpio.LOW if self.use_gpio else False,   # IN4
+            label="forward"
         )
-        logger.debug("Moving forward")
 
     def backward(self):
         """Drive car backward."""
@@ -78,9 +86,9 @@ class MotorController:
             self.gpio.LOW if self.use_gpio else False,   # IN1
             self.gpio.HIGH if self.use_gpio else True,   # IN2
             self.gpio.LOW if self.use_gpio else False,   # IN3
-            self.gpio.HIGH if self.use_gpio else True    # IN4
+            self.gpio.HIGH if self.use_gpio else True,   # IN4
+            label="backward"
         )
-        logger.debug("Moving backward")
 
     def left(self):
         """Pivot left (left side backward, right side forward)."""
@@ -88,9 +96,9 @@ class MotorController:
             self.gpio.HIGH if self.use_gpio else True,   # IN1 - right forward
             self.gpio.LOW if self.use_gpio else False,   # IN2
             self.gpio.LOW if self.use_gpio else False,   # IN3 - left backward
-            self.gpio.HIGH if self.use_gpio else True    # IN4
+            self.gpio.HIGH if self.use_gpio else True,   # IN4
+            label="left"
         )
-        logger.debug("Turning left")
 
     def right(self):
         """Pivot right (right side backward, left side forward)."""
@@ -98,9 +106,9 @@ class MotorController:
             self.gpio.LOW if self.use_gpio else False,   # IN1 - right backward
             self.gpio.HIGH if self.use_gpio else True,   # IN2
             self.gpio.HIGH if self.use_gpio else True,   # IN3 - left forward
-            self.gpio.LOW if self.use_gpio else False    # IN4
+            self.gpio.LOW if self.use_gpio else False,   # IN4
+            label="right"
         )
-        logger.debug("Turning right")
 
     def stop(self):
         """Stop all motors."""
@@ -108,9 +116,9 @@ class MotorController:
             self.gpio.LOW if self.use_gpio else False,
             self.gpio.LOW if self.use_gpio else False,
             self.gpio.LOW if self.use_gpio else False,
-            self.gpio.LOW if self.use_gpio else False
+            self.gpio.LOW if self.use_gpio else False,
+            label="stop"
         )
-        logger.debug("Stopped")
 
     def move(self, direction, duration=0.5):
         """

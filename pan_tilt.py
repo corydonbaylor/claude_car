@@ -48,14 +48,14 @@ class PanTilt:
         if self.use_gpio and self.kit:
             self.kit.servo[PAN_CHANNEL].angle = angle
         self.pan_angle = angle
-        logger.debug(f"Pan set to {angle}")
+        logger.info(f"[SERVO] pan -> {angle}° (channel {PAN_CHANNEL})")
 
     def set_tilt(self, angle: float):
         angle = max(0, min(180, angle))
         if self.use_gpio and self.kit:
             self.kit.servo[TILT_CHANNEL].angle = angle
         self.tilt_angle = angle
-        logger.debug(f"Tilt set to {angle}")
+        logger.info(f"[SERVO] tilt -> {angle}° (channel {TILT_CHANNEL})")
 
     def center(self):
         """Return both axes to forward-facing."""
