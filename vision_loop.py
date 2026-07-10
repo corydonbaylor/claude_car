@@ -211,6 +211,31 @@ class VisionControlLoop:
         else:
             self.motor.stop()
 
+    # -- servo/motor guard ------------------------------------------------
+
+    def _move_pan(self, angle: float):
+        """
+        Point the camera to a pan angle.
+
+        Hard rule, no exceptions: motors are force-stopped and settled
+        immediately before every single pan-tilt move, regardless of what
+        the caller thinks the motor state already is. This is the only
+        place in the codebase allowed to call self.pan_tilt.set_pan, so
+        that guarantee can't be bypassed by a call site forgetting the
+        stop/settle sequence.
+        """
+        self.motor.stop()
+        time.sleep(self.servo_motor_settle_time)
+        self.pan_tilt.set_pan(angle)
+        time.sleep(self.pan_settle_time)
+
+    def _center_camera(self):
+        """Same hard-rule guard as _move_pan, for returning to forward."""
+        self.motor.stop()
+        time.sleep(self.servo_motor_settle_time)
+        self.pan_tilt.center()
+        time.sleep(self.pan_settle_time)
+
     # -- SEARCHING ------------------------------------------------------
 
     def _search_sweep(self):
@@ -221,15 +246,11 @@ class VisionControlLoop:
         Returns the pan angle (degrees) the shoe was found at, or None if
         the full sweep came up empty (or the iteration budget ran out).
         """
-        self.motor.stop()
-        time.sleep(self.servo_motor_settle_time)
-
         for angle in self.pan_sweep_angles:
             if not self._consume_tick():
                 return None
 
-            self.pan_tilt.set_pan(angle)
-            time.sleep(self.pan_settle_time)
+            self._move_pan(angle)
 
             image_path = self._capture()
             image_b64 = self.camera.get_image_base64(image_path)
@@ -250,8 +271,7 @@ class VisionControlLoop:
         car body to a new heading, settle again, then let the next loop
         pass re-sweep from there.
         """
-        self.pan_tilt.center()
-        time.sleep(self.pan_settle_time)
+        self._center_camera()
         time.sleep(self.servo_motor_settle_time)
 
         logger.info(f"[Search] rotating body to search a new heading ({self.search_turn_duration}s turn)")
@@ -267,8 +287,7 @@ class VisionControlLoop:
         face the direction the shoe was found in.
         """
         logger.info("[Align] re-centering camera to forward")
-        self.pan_tilt.center()
-        time.sleep(self.pan_settle_time)
+        self._center_camera()
         time.sleep(self.servo_motor_settle_time)
 
         offset = found_pan_angle - PAN_FORWARD  # negative = shoe was left, positive = right
