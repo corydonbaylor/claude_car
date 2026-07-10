@@ -33,14 +33,23 @@ Fast, local obstacle detection using OpenCV — no API call, runs every frame.
 - If the center region is blocked, immediately returns an escape direction (toward whichever side has more edge detail / is more open)
 - Coarse heuristic, not true depth sensing — thresholds may need tuning per camera/environment
 
+### `pan_tilt.py`
+Pan-tilt camera mount control via the Arducam PCA9685 servo board (I2C `0x40`).
+
+**Key class:** `PanTilt`
+- Supports the real servo board on the Pi and simulation mode for dev machines, same `use_gpio` pattern as `MotorController`
+- Methods: `set_pan(angle)`, `set_tilt(angle)`, `center()`
+- `PAN_FORWARD` / `TILT_FORWARD` (both 90°) are the hardware-calibrated forward positions — see handoff.md before changing them
+
 ### `vision_loop.py`
-Main control loop integrating everything, running as two concurrent threads.
+Main control loop: a search -> align -> approach state machine, single-threaded.
 
 **Key class:** `VisionControlLoop`
-- **Reflex loop** (fast, `--reflex-interval`, default 0.3s): the only thread that touches the camera. Captures a frame, runs the OpenCV obstacle check, and either does a quick evasive turn or keeps driving continuously in the current target direction. No stop-start between ticks — this is what makes driving smooth instead of jerky.
-- **Reasoning loop** (slow, `--reasoning-interval`, default 2.0s): reads the most recently captured frame and asks Claude for a direction toward the goal (currently: navigate toward a roll of duct tape). Updates the target direction the reflex loop drives toward.
+- **SEARCHING**: the car stays fully stopped. The pan-tilt sweeps across a fixed set of angles (default 30/60/90/120/150°, set via `pan_sweep_angles` in code), capturing a frame and asking Claude "is the shoe here?" at each one. If the full sweep finds nothing, the pan-tilt is re-centered and settled, the car body pivots to a new heading, and the sweep repeats.
+- **ALIGNING**: once the shoe is found at some pan angle, the camera is re-centered to forward first (and settled), then the car body turns to face the direction the shoe was found in.
+- **APPROACHING**: with the shoe roughly dead ahead, the car drives forward continuously — OpenCV reflexes (`--reflex-interval`, default 0.3s) watch every tick for close obstacles — while periodically (`--reasoning-interval`, default 2.0s) stopping just long enough for a clean Claude recheck that the shoe is still visible and centered. If it's lost, control returns to SEARCHING.
 
-This splits responsibilities: OpenCV handles fast "reflexes" (imminent collision avoidance, zero API latency, motors never fully stop between ticks), Claude handles slower "reasoning" (steering toward the goal, searching when the target isn't visible, stopping when arrived).
+Motors and the pan-tilt servos are never actuated at the same time (`--servo-motor-settle`, default 0.5s minimum) — see the hard rule in handoff.md.
 
 **Entry point:** `main()` with CLI arguments
 
@@ -96,13 +105,13 @@ python tests/test_motors.py --simulate
 
 ### Run vision control loop
 ```bash
-# Simulation (mock camera, no GPIO)
-python vision_loop.py --simulate --iterations 5
+# Simulation (mock camera, no GPIO/servos)
+python vision_loop.py --simulate --iterations 20
 
-# Real hardware, reasoning every 2s, reflex tick every 0.3s (defaults)
-python vision_loop.py --iterations 10
+# Real hardware, defaults (2s reasoning recheck, 0.3s reflex tick during approach)
+python vision_loop.py --iterations 30
 
-# Faster reasoning cadence, slower reflex tick
+# Faster reasoning cadence during approach, slower reflex tick
 python vision_loop.py --reasoning-interval 1.0 --reflex-interval 0.5
 
 # Infinite loop (Ctrl+C to stop)
@@ -115,10 +124,13 @@ python vision_loop.py --help
 ```
 
 Options:
-- `--iterations N`: Run N Claude reasoning cycles then stop (default: infinite)
-- `--reasoning-interval SECS`: Seconds between Claude calls (default: 2.0)
-- `--reflex-interval SECS`: Seconds between reflex/motor ticks (default: 0.3)
-- `--simulate`: Use simulation mode (mock camera, no GPIO)
+- `--iterations N`: Run N Claude/action ticks in total then stop (default: infinite). Each pan-tilt check during a search sweep and each recheck during approach counts as one tick.
+- `--reasoning-interval SECS`: Seconds between Claude rechecks while approaching (default: 2.0)
+- `--reflex-interval SECS`: Seconds between reflex/motor ticks while approaching (default: 0.3)
+- `--capture-settle SECS`: Seconds to hold the car still before a reasoning recheck captures a frame (default: 0.4)
+- `--pan-settle SECS`: Seconds to wait after a pan move before capturing, so the servo has physically arrived (default: 0.3)
+- `--servo-motor-settle SECS`: Minimum pause at every servo/motor handoff — don't go below 0.5 (default: 0.5)
+- `--simulate`: Use simulation mode (mock camera, no GPIO/servos)
 - `--api-key KEY`: Pass API key directly (or use ANTHROPIC_API_KEY env var)
 
 ## Design notes
@@ -133,21 +145,18 @@ The motor control class detects if `RPi.GPIO` is available. On dev machines with
 Same idea: on non-Pi machines, `camera.py` creates tiny valid JPEG files instead of capturing. This tests the full pipeline (capture → base64 → Claude API → parse) without hardware.
 
 ### Vision API prompt
-The prompt currently targets a specific goal — navigating toward a shoe — and asks Claude for two lines:
-- `DIRECTION: <word>` — parsed to drive the car
+The prompt targets a specific goal — finding a shoe — and asks Claude to report structured observations, not a movement decision:
+- `FOUND: <yes|no>`
+- `POSITION: <left|center|right|none>` — where the shoe is in the frame
 - `SEEN: <short description>` — not used for driving, just logged via `[Claude sees] ...` so you can check what Claude is actually picking up in the frame
 
-This makes it easy to tell a recognition problem (target not identified despite being visible) apart from a camera problem (target not legible in the captured frame at all) — just tail the logs and compare what Claude reports seeing against what's actually in front of the car.
-
-Tell Claude to search (turn) when the target isn't visible, and to stop when it fills the frame. Can be tuned later by changing the prompt text in `VisionControlLoop.get_next_action()`.
+Claude never picks a direction itself; `VisionControlLoop` derives every motor/servo action from `found`/`position` deterministically (see `_search_sweep`, `_align_to_target`, `_approach_loop`). This prevents Claude from guessing a direction on a hunch when the target isn't actually visible, and makes it easy to tell a recognition problem (target not identified despite being visible) apart from a camera problem (target not legible in the frame at all) — just tail the logs and compare what Claude reports seeing against what's actually in front of the car. Can be tuned by changing the prompt text in `VisionControlLoop._observe()`.
 
 ### Why 1280x720 instead of 640x480?
 The original lower resolution made it harder for Claude to pick out small/distant objects (e.g. a duct tape roll blended into the floor). Bumped up in `camera.py` for more detail — if this turns out to slow down capture or the API call too much on the Pi, drop it back down.
 
-### Why threads instead of a single loop?
-The old design captured a frame, blocked on a full Claude API round-trip, moved briefly, then stopped — every single cycle. That's inherently stop-and-go. Splitting into a fast reflex thread (drives continuously, reacts to obstacles instantly) and a slow reasoning thread (only updates the *target direction* every couple seconds) means the car keeps moving smoothly while Claude "thinks" in the background.
-
-Only the reflex thread touches the camera, to avoid two threads fighting over the hardware. The reasoning thread reads whatever frame the reflex thread most recently captured.
+### Why a state machine instead of always driving?
+The car now searches with the pan-tilt before it ever drives, so SEARCHING and ALIGNING are inherently stop-and-go by design — the hard rule (never move servos and motors at once) makes that unavoidable during a search. APPROACHING is the one phase where continuous motion still matters (once the shoe is found and the car is driving toward it), so it keeps the old fast-reflex / periodic-reasoning-recheck split, just run sequentially in one thread instead of two: a handful of reflex ticks (driving, checking for obstacles) between each clean Claude recheck, rather than two threads racing over shared camera/motor state.
 
 ## Troubleshooting
 

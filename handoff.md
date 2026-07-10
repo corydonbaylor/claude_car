@@ -2,7 +2,7 @@
 
 ## What this project is
 
-A Raspberry Pi 4 RC car with a camera, driven by a Claude vision loop, with a pan-tilt camera mount added on top. Two decision-making layers: OpenCV handles fast local obstacle avoidance ("reflexes"), Claude handles slower goal-directed reasoning (currently: find and approach a shoe).
+A Raspberry Pi 4 RC car with a camera, driven by a Claude vision loop, with a pan-tilt camera mount added on top. The car searches for its target (currently: a shoe) using only the pan-tilt while sitting still, then aligns its body and drives to approach once found. OpenCV handles fast local obstacle avoidance ("reflexes") during the approach; Claude handles goal-directed reasoning (is the shoe visible? where?) throughout.
 
 Repo: git repo at this directory. SSH into the car: `ssh pi@192.168.1.95`.
 
@@ -14,8 +14,9 @@ Repo: git repo at this directory. SSH into the car: `ssh pi@192.168.1.95`.
 |---|---|
 | `motor_control.py` | `MotorController` class — GPIO control for the 4 drive motors via L298N. Simulation mode auto-fallback if `RPi.GPIO` isn't installed. |
 | `camera.py` | `Camera` class — captures via `rpicam-still`/`raspistill`, `rotation=180` (camera is physically mounted upside-down), clears `captures/` on each run. |
-| `reflexes.py` | `ReflexEngine` — Canny edge density check on the near-field of each frame; triggers an evasive turn if an obstacle is detected directly ahead. No API call, runs every tick. |
-| `vision_loop.py` | `VisionControlLoop` — two threads: a fast reflex/drive loop (~0.3s tick, owns the camera, drives continuously) and a slow reasoning loop (~2s tick, stops the car, settles, captures a clean frame, asks Claude for a direction). Current goal: find a shoe. Claude reports structured observations (`FOUND`, `POSITION`) rather than picking a direction itself — direction is derived deterministically in code. |
+| `reflexes.py` | `ReflexEngine` — Canny edge density check on the near-field of each frame; triggers an evasive turn if an obstacle is detected directly ahead. No API call, runs every tick during the approach phase. |
+| `pan_tilt.py` | `PanTilt` — wraps the PCA9685 servo board (`set_pan`, `set_tilt`, `center`). Simulation-mode auto-fallback if the board isn't reachable, same pattern as `MotorController`. `PAN_FORWARD`/`TILT_FORWARD` = 90° each, the hardware-calibrated forward position. |
+| `vision_loop.py` | `VisionControlLoop` — single-threaded search -> align -> approach state machine. **SEARCHING**: car fully stopped, pan-tilt sweeps 5 fixed angles (30/60/90/120/150°) asking Claude "is the shoe here?" at each; if the whole sweep misses, pan-tilt re-centers, the car body pivots to a new heading, sweep repeats. **ALIGNING**: pan-tilt re-centers to forward first, then the car body turns to face the direction the shoe was found in (turn duration scaled from the pan offset). **APPROACHING**: drives forward continuously with OpenCV reflexes active, periodically stopping for a clean Claude recheck; if the shoe is lost, returns to SEARCHING. Claude only ever reports structured observations (`FOUND`, `POSITION`) — it never picks a direction, motor/servo actions are derived deterministically in code. Every servo/motor handoff is separated by a settle pause (`servo_motor_settle_time`, minimum 0.5s) per the hard rule below. |
 | `center_pan_tilt.py` | Calibration utility — holds the pan-tilt servos at a given angle (default 90/90) so the mount/horn can be physically adjusted. PCA9685 keeps outputting the signal after the script exits. |
 | `tests/test_motors.py` | Drives through forward/backward/left/right/stop. Defaults to real GPIO; pass `--simulate` to force simulation. |
 | `tests/test_pan_tilt.py` | Small, cautious pan-tilt servo test (±15° nudges only), checks `vcgencmd get_throttled` after every move, aborts on any undervoltage signal. |
@@ -78,14 +79,14 @@ The pan-tilt servos and the L298N's logic terminal both ultimately draw from the
 - Pan-tilt I2C link: `sudo i2cdetect -y 1` shows device at `0x40`.
 - Pan-tilt small movements: `tests/test_pan_tilt.py` ran clean — pan and tilt both nudge ±15° and return, zero `vcgencmd get_throttled` events throughout.
 - Pan-tilt calibration: physically adjusted and confirmed, both axes forward = 90°.
-- Vision loop pipeline: exercised in simulation mode locally (mock camera, dummy key) — full capture → reflex check → reasoning → action cycle runs without crashing. Not yet stress-tested for extended real-world runs.
+- Vision loop pipeline: exercised in simulation mode locally (mock camera, dummy key, simulated servos/motors) — search sweep → align → approach state transitions all run without crashing, including the full-sweep-miss → rotate → re-sweep path and the approach → target-lost → back-to-search path. Not yet run on real hardware or stress-tested for extended real-world runs.
 
 ## Not yet done — natural next steps
 
-1. **Pan-tilt full range-of-motion sweep** (only small ±15° nudges have been tested so far).
-2. **Alternated servo/motor test** — pan → settle → drive → stop → pan the other way → settle → drive → stop, checking `vcgencmd get_throttled` throughout. Validates the hard-rule sequencing under realistic combined usage.
-3. **Camera + servo integration test** — capture frames at pan left/center/right, confirm three distinct viewpoints. This is what actually proves the pan-tilt is useful for the vision loop, not just that it moves.
-4. **Wire the pan-tilt into `vision_loop.py`** — currently the vision loop only drives the car; it doesn't use the pan-tilt to look around. Not built yet.
+1. **Pan-tilt full range-of-motion sweep** (only small ±15° nudges have been tested so far). The new search sweep in `vision_loop.py` uses 30-150°, which exceeds the tested ±15° range — do this test before trusting the sweep on hardware.
+2. **Alternated servo/motor test** — pan → settle → drive → stop → pan the other way → settle → drive → stop, checking `vcgencmd get_throttled` throughout. Validates the hard-rule sequencing under realistic combined usage. The new search/align state machine does exactly this pattern in production, so this test doubles as validation for it.
+3. **Camera + servo integration test** — capture frames at pan left/center/right, confirm three distinct viewpoints.
+4. **Wired the pan-tilt into `vision_loop.py`** (done) — search/align/approach state machine described above. Not yet run on real hardware; only exercised in `--simulate` mode so far. `body_turn_seconds_per_degree` (how long the car pivots per degree of pan offset when aligning) is an unverified guess and needs empirical tuning on the car.
 5. Personality add-ons from the original hardware handoff (OLED face display, mic/speaker) — not purchased/wired.
 
 ---
