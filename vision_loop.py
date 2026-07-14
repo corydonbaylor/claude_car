@@ -321,6 +321,13 @@ class VisionControlLoop:
 
         self._remaining_iterations = iterations
 
+        # Establish the camera's driving posture (pan forward, tilt at the
+        # default down-angle) before the first sweep. Without this the tilt
+        # channel is never commanded during SEARCHING — the sweep only moves
+        # pan — so the tilt servo would just stay wherever it physically was.
+        logger.info("Setting camera to default posture (pan forward, tilt down)...")
+        self._center_camera()
+
         try:
             while True:
                 if self._remaining_iterations is not None and self._remaining_iterations <= 0:
