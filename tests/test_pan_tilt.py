@@ -6,8 +6,18 @@ Per handoff.md: servos only, motors must be fully stopped and untouched
 during this test (this script never imports motor_control, so that's
 enforced by construction). Movements are small and slow on purpose —
 this is a first-contact test, not a full range-of-motion sweep.
+
+Default (no flags): the original ±15° nudge test on both axes.
+
+With --pan and/or --tilt: centers both servos, then moves smoothly to the
+requested angle(s) and holds there (the PCA9685 keeps the position after
+the script exits). 0=left/down, 90=forward, 180=right/up.
+
+    python3 tests/test_pan_tilt.py --pan 45
+    python3 tests/test_pan_tilt.py --pan 135 --tilt 60
 """
 
+import argparse
 import subprocess
 import time
 import logging
@@ -53,7 +63,50 @@ def move_smoothly(kit, channel, from_angle, to_angle, label):
         time.sleep(STEP_DELAY)
 
 
+def move_to_angles(kit, pan_target, tilt_target):
+    """Center both servos, then move smoothly to the requested angles and hold."""
+    logger.info("Centering both servos first.")
+    kit.servo[PAN_CHANNEL].angle = PAN_FORWARD
+    kit.servo[TILT_CHANNEL].angle = TILT_FORWARD
+    time.sleep(0.5)
+
+    if not check_throttled():
+        return
+
+    if pan_target is not None:
+        move_smoothly(kit, PAN_CHANNEL, PAN_FORWARD, pan_target, "pan")
+        time.sleep(0.5)
+        if not check_throttled():
+            return
+
+    if tilt_target is not None:
+        move_smoothly(kit, TILT_CHANNEL, TILT_FORWARD, tilt_target, "tilt")
+        time.sleep(0.5)
+        if not check_throttled():
+            return
+
+    logger.info(
+        f"Done. Holding pan={pan_target if pan_target is not None else PAN_FORWARD}°, "
+        f"tilt={tilt_target if tilt_target is not None else TILT_FORWARD}°. "
+        "The PCA9685 keeps this position after the script exits."
+    )
+
+
 def main():
+    parser = argparse.ArgumentParser(
+        description="Pan-tilt servo test. No flags = small ±15° nudge test; "
+                    "--pan/--tilt = move to specific angles and hold."
+    )
+    parser.add_argument("--pan", type=int, default=None,
+                        help="Pan angle to move to and hold (0=left, 90=forward, 180=right)")
+    parser.add_argument("--tilt", type=int, default=None,
+                        help="Tilt angle to move to and hold (0=down, 90=forward, 180=up)")
+    args = parser.parse_args()
+
+    for name, val in (("--pan", args.pan), ("--tilt", args.tilt)):
+        if val is not None and not 0 <= val <= 180:
+            parser.error(f"{name} must be between 0 and 180")
+
     try:
         from adafruit_servokit import ServoKit
     except ImportError:
@@ -72,6 +125,10 @@ def main():
             "Run 'sudo i2cdetect -y 1' and confirm a device shows up at 40 "
             "before retrying."
         )
+        return
+
+    if args.pan is not None or args.tilt is not None:
+        move_to_angles(kit, args.pan, args.tilt)
         return
 
     logger.info("Connected. Centering both servos first.")

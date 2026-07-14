@@ -13,7 +13,7 @@ Low-level motor control via GPIO pins and L298N driver.
 - Handles all 4 motors (front-left, front-right, back-left, back-right)
 
 **GPIO pin mapping** (from L298N wiring):
-- Right motors: GPIO 18 (IN1/forward), GPIO 17 (IN2/backward), GPIO 25 (ENA/enable)
+- Right motors: GPIO 23 (IN1/forward — remapped from GPIO 18 on 2026-07-10, see handoff.md), GPIO 17 (IN2/backward), GPIO 25 (ENA/enable)
 - Left motors: GPIO 22 (IN3/forward), GPIO 27 (IN4/backward), GPIO 24 (ENB/enable)
 
 ### `camera.py`
@@ -46,7 +46,7 @@ Pan-tilt camera mount control via the Arducam PCA9685 servo board (I2C `0x40`).
 Main control loop: a search -> align -> approach state machine, single-threaded. Exactly three modes:
 
 **Key class:** `VisionControlLoop`
-- **SEARCHING**: the L298N direction pins are held LOW for the whole mode — the drive motors are never touched here except to hold them stopped. The pan-tilt sweeps a fixed set of angles (default 30/60/90/120/150°, set via `pan_sweep_angles` in code), capturing a frame and asking Claude "is the shoe here?" at each one. If none of the five show the shoe, the sweep just repeats from the first angle. As soon as one does, it exits immediately for ALIGNING.
+- **SEARCHING**: the L298N is fully disabled for the whole mode — all six pins (IN1-IN4 *and* ENA/ENB) held LOW via `MotorController.disable()`, so the driver outputs nothing while the servos work. The pan-tilt sweeps a fixed set of angles (default 30/60/90/120/150°, set via `pan_sweep_angles` in code), capturing a frame and asking Claude "is the shoe here?" at each one. If none of the five show the shoe, the sweep just repeats from the first angle. As soon as one does, it exits immediately for ALIGNING. The next drive command re-enables the driver automatically.
 - **ALIGNING**: the camera is re-centered to forward first, then the car body turns toward the direction the shoe was found in. After turning, it takes a fresh photo — if the shoe is still in frame, move on to APPROACHING; if not, back to SEARCHING.
 - **APPROACHING**: drive straight forward (`--approach-tick`, default 0.3s per tick) until interrupted (Ctrl+C or `--iterations` budget). No steering or obstacle checks in this mode — see `reflexes.py` above.
 

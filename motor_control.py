@@ -7,7 +7,11 @@ logger = logging.getLogger(__name__)
 
 # GPIO pins (BCM numbering)
 # Right side on OUT1/OUT2, Left side on OUT3/OUT4
-IN1, IN2 = 18, 17   # right side: forward/backward
+# IN1 was GPIO18 (physical pin 12) until 2026-07-10; remapped to GPIO23
+# (physical pin 16) after GPIO18 spent an extended period sinking a hard
+# 5V short from a faulty L298N (internal 5V-to-IN1 bridge). GPIO18 tested
+# functional afterward but is retired as a precaution — see handoff.md.
+IN1, IN2 = 23, 17   # right side: forward/backward
 IN3, IN4 = 22, 27   # left side: forward/backward
 ENA, ENB = 25, 24   # enable pins for speed control
 
@@ -80,6 +84,7 @@ class MotorController:
         """
         self.use_gpio = use_gpio
         self.gpio = None
+        self.enabled = True
 
         if use_gpio:
             try:
@@ -102,8 +107,33 @@ class MotorController:
         # Enable both channels at full speed by default
         self.gpio.output(ENA, self.gpio.HIGH)
         self.gpio.output(ENB, self.gpio.HIGH)
+        self.enabled = True
         logger.info("GPIO initialized (pincheck v2, drive-aware)")
         self._log_hardware_pin_states(expected=None)
+
+    def disable(self):
+        """
+        Drop every L298N pin LOW — direction pins AND both enables — so the
+        driver's outputs are fully off (not even braking) while the pan-tilt
+        servos are active. Direction commands automatically re-enable.
+        """
+        if self.use_gpio and self.gpio:
+            self.gpio.output(PINS, self.gpio.LOW)
+        self.enabled = False
+        logger.info("[MOTOR] disabled -> all six L298N pins LOW (outputs off)")
+        self._log_hardware_pin_states(
+            expected={IN1: False, IN2: False, IN3: False, IN4: False, ENA: False, ENB: False}
+        )
+
+    def _ensure_enabled(self):
+        """Raise ENA/ENB again before driving, if disable() dropped them."""
+        if self.enabled:
+            return
+        if self.use_gpio and self.gpio:
+            self.gpio.output(ENA, self.gpio.HIGH)
+            self.gpio.output(ENB, self.gpio.HIGH)
+        self.enabled = True
+        logger.info("[MOTOR] re-enabled -> ENA/ENB HIGH")
 
     def _log_hardware_pin_states(self, expected=None):
         """
@@ -185,46 +215,58 @@ class MotorController:
         # Read back what the pins actually measure at the header, so the log
         # shows electrical reality next to the software command.
         self._log_hardware_pin_states(
-            expected={IN1: in1, IN2: in2, IN3: in3, IN4: in4, ENA: True, ENB: True}
+            expected={IN1: in1, IN2: in2, IN3: in3, IN4: in4,
+                      ENA: self.enabled, ENB: self.enabled}
         )
+
+    # NOTE (2026-07-13): the L298N rewiring inverted both motor channels'
+    # polarity (motor leads swapped relative to the original build), so the
+    # IN pin patterns below are intentionally the reverse of the classic
+    # layout — IN2/IN4 now mean "forward". Verified on hardware. If motors
+    # are ever rewired again and directions flip, swap these patterns back
+    # rather than touching the wiring.
 
     def forward(self):
         """Drive car forward."""
+        self._ensure_enabled()
         self._set_pins(
-            self.gpio.HIGH if self.use_gpio else True,   # IN1
-            self.gpio.LOW if self.use_gpio else False,   # IN2
-            self.gpio.HIGH if self.use_gpio else True,   # IN3
-            self.gpio.LOW if self.use_gpio else False,   # IN4
+            self.gpio.LOW if self.use_gpio else False,   # IN1
+            self.gpio.HIGH if self.use_gpio else True,   # IN2 - right forward
+            self.gpio.LOW if self.use_gpio else False,   # IN3
+            self.gpio.HIGH if self.use_gpio else True,   # IN4 - left forward
             label="forward"
         )
 
     def backward(self):
         """Drive car backward."""
+        self._ensure_enabled()
         self._set_pins(
-            self.gpio.LOW if self.use_gpio else False,   # IN1
-            self.gpio.HIGH if self.use_gpio else True,   # IN2
-            self.gpio.LOW if self.use_gpio else False,   # IN3
-            self.gpio.HIGH if self.use_gpio else True,   # IN4
+            self.gpio.HIGH if self.use_gpio else True,   # IN1 - right backward
+            self.gpio.LOW if self.use_gpio else False,   # IN2
+            self.gpio.HIGH if self.use_gpio else True,   # IN3 - left backward
+            self.gpio.LOW if self.use_gpio else False,   # IN4
             label="backward"
         )
 
     def left(self):
         """Pivot left (left side backward, right side forward)."""
+        self._ensure_enabled()
         self._set_pins(
-            self.gpio.HIGH if self.use_gpio else True,   # IN1 - right forward
-            self.gpio.LOW if self.use_gpio else False,   # IN2
-            self.gpio.LOW if self.use_gpio else False,   # IN3 - left backward
-            self.gpio.HIGH if self.use_gpio else True,   # IN4
+            self.gpio.LOW if self.use_gpio else False,   # IN1
+            self.gpio.HIGH if self.use_gpio else True,   # IN2 - right forward
+            self.gpio.HIGH if self.use_gpio else True,   # IN3 - left backward
+            self.gpio.LOW if self.use_gpio else False,   # IN4
             label="left"
         )
 
     def right(self):
         """Pivot right (right side backward, left side forward)."""
+        self._ensure_enabled()
         self._set_pins(
-            self.gpio.LOW if self.use_gpio else False,   # IN1 - right backward
-            self.gpio.HIGH if self.use_gpio else True,   # IN2
-            self.gpio.HIGH if self.use_gpio else True,   # IN3 - left forward
-            self.gpio.LOW if self.use_gpio else False,   # IN4
+            self.gpio.HIGH if self.use_gpio else True,   # IN1 - right backward
+            self.gpio.LOW if self.use_gpio else False,   # IN2
+            self.gpio.LOW if self.use_gpio else False,   # IN3
+            self.gpio.HIGH if self.use_gpio else True,   # IN4 - left forward
             label="right"
         )
 

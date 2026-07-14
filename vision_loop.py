@@ -27,8 +27,9 @@ class VisionControlLoop:
     Claude-controlled search-and-approach loop for a shoe, built around a
     pan-tilt camera mount. Exactly three modes:
 
-    - SEARCHING: the L298N direction pins are held LOW (car fully stopped)
-      for the entire mode — nothing here ever moves the drive motors. The
+    - SEARCHING: the L298N is fully disabled — all six pins (direction AND
+      enables) held LOW, outputs off — for the entire mode; nothing here
+      ever moves the drive motors. The
       pan-tilt sweeps its five fixed angles, capturing a frame and asking
       Claude "is the shoe here?" at each one. If none of the five show the
       shoe, the sweep just repeats from the first angle. As soon as one
@@ -196,21 +197,23 @@ class VisionControlLoop:
         """
         Point the camera to a pan angle.
 
-        Hard rule, no exceptions: motors are force-stopped and settled
+        Hard rule, no exceptions: the L298N is fully disabled — all six
+        pins LOW, outputs off, drawing no output power — and settled
         immediately before every single pan-tilt move, regardless of what
         the caller thinks the motor state already is. This is the only
         place in the codebase allowed to call self.pan_tilt.set_pan, so
         that guarantee can't be bypassed by a call site forgetting the
-        stop/settle sequence.
+        disable/settle sequence. The next drive command re-enables the
+        driver automatically (MotorController._ensure_enabled).
         """
-        self.motor.stop()
+        self.motor.disable()
         time.sleep(self.servo_motor_settle_time)
         self.pan_tilt.set_pan(angle)
         time.sleep(self.pan_settle_time)
 
     def _center_camera(self):
         """Same hard-rule guard as _move_pan, for returning to forward."""
-        self.motor.stop()
+        self.motor.disable()
         time.sleep(self.servo_motor_settle_time)
         self.pan_tilt.center()
         time.sleep(self.pan_settle_time)
@@ -219,9 +222,9 @@ class VisionControlLoop:
 
     def _search_sweep(self):
         """
-        Sweep the pan-tilt across self.pan_sweep_angles. The drive motors
-        are never touched here except to hold them stopped (via _move_pan's
-        guard) — the car does not move at all during search.
+        Sweep the pan-tilt across self.pan_sweep_angles. The L298N is kept
+        fully disabled (all six pins LOW, via _move_pan's guard) — the car
+        does not move and the motor driver outputs nothing during search.
 
         Returns the pan angle (degrees) the shoe was found at, or None if
         the full sweep came up empty (or the iteration budget ran out) —
@@ -338,11 +341,11 @@ class VisionControlLoop:
     def cleanup(self):
         """Clean up resources."""
         logger.info("Cleaning up...")
-        self.motor.stop()
-        self.motor.cleanup()
+        self.motor.disable()
         time.sleep(self.servo_motor_settle_time)
         self.pan_tilt.center()
         self.pan_tilt.cleanup()
+        self.motor.cleanup()
         self.camera.cleanup()
         logger.info("Done.")
 
