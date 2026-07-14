@@ -10,6 +10,10 @@ TILT_CHANNEL = 0
 PAN_FORWARD = 90
 TILT_FORWARD = 90
 
+# Default resting tilt: 10° below level, so the camera looks slightly down
+# at the floor ahead (where a shoe would be) instead of dead level.
+TILT_DEFAULT = TILT_FORWARD - 10
+
 
 class PanTilt:
     """
@@ -41,7 +45,7 @@ class PanTilt:
             logger.info("Running pan-tilt in simulation mode")
 
         self.pan_angle = PAN_FORWARD
-        self.tilt_angle = TILT_FORWARD
+        self.tilt_angle = TILT_DEFAULT
 
     def set_pan(self, angle: float):
         angle = max(0, min(180, angle))
@@ -58,9 +62,9 @@ class PanTilt:
         logger.info(f"[SERVO] tilt -> {angle}° (channel {TILT_CHANNEL})")
 
     def center(self):
-        """Return both axes to forward-facing."""
+        """Return pan to forward and tilt to the default 10°-down resting angle."""
         self.set_pan(PAN_FORWARD)
-        self.set_tilt(TILT_FORWARD)
+        self.set_tilt(TILT_DEFAULT)
 
     def relax(self):
         """
