@@ -10,9 +10,9 @@ TILT_CHANNEL = 0
 PAN_FORWARD = 90
 TILT_FORWARD = 90
 
-# Default resting tilt: 10° below level, so the camera looks slightly down
-# at the floor ahead (where a shoe would be) instead of dead level.
-TILT_DEFAULT = TILT_FORWARD - 10
+# Default resting tilt: 30° below level, so the camera looks down at the
+# floor ahead (where a shoe would be) instead of dead level.
+TILT_DEFAULT = 60
 
 
 class PanTilt:
