@@ -40,10 +40,13 @@ class VisionControlLoop:
       APPROACHING; if not, go back to SEARCHING.
     - APPROACHING: drive straight forward until interrupted.
 
-    Motors and the pan-tilt servos are never actuated at the same time —
-    see the hard rule in handoff.md. Every pan-tilt move goes through
-    _move_pan/_center_camera, which force the motors stopped and settled
-    immediately beforehand, unconditionally.
+    Motors and the pan-tilt servos never draw power at the same time, in
+    either direction: every pan-tilt move goes through _move_pan/
+    _center_camera, which fully disable the L298N (all six pins LOW) and
+    settle first; and every motor phase (align turn, approach) calls
+    pan_tilt.relax() first, cutting the servos' pulses so they draw no
+    holding current while the car drives. The camera holds its position
+    mechanically while relaxed; the next pan command re-energizes it.
     """
 
     def __init__(self, use_gpio: bool = True,
@@ -263,6 +266,11 @@ class VisionControlLoop:
         logger.info("[Align] re-centering camera to forward")
         self._center_camera()
 
+        # Mirror of motor.disable(): cut the servos' pulses before any motor
+        # activity so the two never draw from the Pi's rail at once. The
+        # camera holds position mechanically; the next pan re-energizes.
+        self.pan_tilt.relax()
+
         offset = found_pan_angle - PAN_FORWARD  # negative = shoe was left, positive = right
 
         if abs(offset) <= self.align_deadband_degrees:
@@ -291,6 +299,7 @@ class VisionControlLoop:
 
     def _approach(self):
         """Drive straight forward toward the shoe until interrupted (Ctrl+C or --iterations budget)."""
+        self.pan_tilt.relax()  # no servo holding current while driving (idempotent)
         logger.info("[Approach] driving forward")
         while self._consume_tick():
             self.motor.forward()

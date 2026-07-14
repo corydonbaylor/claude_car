@@ -62,6 +62,18 @@ class PanTilt:
         self.set_pan(PAN_FORWARD)
         self.set_tilt(TILT_FORWARD)
 
+    def relax(self):
+        """
+        Stop sending pulses to both servos so they draw no holding current
+        (the gear train holds the lightweight camera on its own — confirmed
+        on this hardware, the mount doesn't droop unpowered). Any later
+        set_pan/set_tilt/center re-energizes them automatically.
+        """
+        if self.use_gpio and self.kit:
+            self.kit.servo[PAN_CHANNEL].angle = None
+            self.kit.servo[TILT_CHANNEL].angle = None
+        logger.info("[SERVO] relaxed -> pulses off, no holding current")
+
     def cleanup(self):
         """No GPIO handle to release — the PCA9685 holds its last position in hardware."""
         pass
